@@ -67,7 +67,8 @@ else
     log "rclone already installed"
 fi
 
-# Configure rclone remote with service account
+# Configure rclone remote with service account (shared system-wide config)
+export RCLONE_CONFIG="/etc/rclone.conf"
 log "Configuring rclone remote: ${RCLONE_REMOTE}"
 
 # Remove existing remote if present (to avoid conflicts)
@@ -113,6 +114,10 @@ log "Cron job installed: $CRON_SCHEDULE"
 
 # Make backup script executable
 chmod +x "$SCRIPT_DIR/backup.sh"
+
+# Ensure rclone config is accessible to both user and root
+# (rclone config only stores a reference to the key path, which needs root to read)
+chmod 644 "$RCLONE_CONFIG"
 
 log ""
 log "========================================="

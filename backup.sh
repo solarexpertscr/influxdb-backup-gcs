@@ -15,6 +15,9 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 source "$ENV_FILE"
 
+# Use shared rclone config (set during setup.sh)
+export RCLONE_CONFIG="/etc/rclone.conf"
+
 # Derived values
 GCS_BUCKET="gs://${SITE_NAME}"
 RCLONE_DEST="${RCLONE_REMOTE}:${SITE_NAME}"
