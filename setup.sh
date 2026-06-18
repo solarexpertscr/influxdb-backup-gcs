@@ -55,6 +55,12 @@ mkdir -p "$LOCAL_BACKUP_DIR"
 # Install rclone if not present (~50MB single binary, vs ~400MB for google-cloud-sdk)
 if ! command -v rclone &> /dev/null; then
     log "Installing rclone..."
+    # rclone installer needs unzip to extract the binary
+    if ! command -v unzip &> /dev/null; then
+        log "Installing unzip (required by rclone installer)..."
+        apt-get update -qq
+        apt-get install -y unzip
+    fi
     curl https://rclone.org/install.sh | bash
     log "rclone installed ($(du -sh $(which rclone) | cut -f1))"
 else
