@@ -1,6 +1,9 @@
 #!/bin/bash
 
-set -e
+set -euo pipefail
+
+# Set PATH explicitly for cron compatibility
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Load environment
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -21,10 +24,21 @@ TIMESTAMP=$(date +%Y%m%d%H%M%S)
 BACKUP_NAME="${BACKUP_PREFIX}_${SITE_NAME}_${TIMESTAMP}"
 LOCAL_BACKUP_PATH="${LOCAL_BACKUP_DIR}/${BACKUP_NAME}"
 
+# Create log file if it doesn't exist (for cron runs)
+LOG_FILE="/var/log/influxdb-backup.log"
+if [ ! -f "$LOG_FILE" ]; then
+    touch "$LOG_FILE" 2>/dev/null || true
+fi
+
 # Create temporary local backup directory
 mkdir -p "${LOCAL_BACKUP_DIR}"
 
 echo "[$(date)] Starting InfluxDB backup for ${SITE_NAME}..."
+
+# Activate service account (ensures auth is fresh)
+if [ -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
+    gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
+fi
 
 # Execute InfluxDB backup to local temp directory
 influxd backup -portable "${LOCAL_BACKUP_PATH}"
@@ -45,13 +59,7 @@ tar -czf "${BACKUP_NAME}.tar.gz" "${BACKUP_NAME}"
 # Upload to GCS
 gsutil cp "${LOCAL_BACKUP_DIR}/${BACKUP_NAME}.tar.gz" "${GCS_BUCKET}/${BACKUP_NAME}.tar.gz"
 
-# Check upload success
-if [ $? -eq 0 ]; then
-    echo "[$(date)] Backup uploaded to ${GCS_BUCKET}/${BACKUP_NAME}.tar.gz"
-else
-    echo "[$(date)] ERROR: Upload to GCS failed"
-    exit 1
-fi
+echo "[$(date)] Backup uploaded to ${GCS_BUCKET}/${BACKUP_NAME}.tar.gz"
 
 # Cleanup local temporary files
 rm -rf "${LOCAL_BACKUP_DIR}"
