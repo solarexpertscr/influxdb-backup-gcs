@@ -73,7 +73,7 @@ log "Configuring rclone remote: ${RCLONE_REMOTE}"
 # Remove existing remote if present (to avoid conflicts)
 rclone config delete "${RCLONE_REMOTE}" 2>/dev/null || true
 
-rclone config create "${RCLONE_REMOTE}" google \
+rclone config create "${RCLONE_REMOTE}" "google cloud storage" \
     service_account_file "$KEY_FILE"
 
 log "rclone remote '${RCLONE_REMOTE}' configured"
