@@ -26,6 +26,27 @@ fi
 
 log "Installing InfluxDB backup for site: ${SITE_NAME}"
 
+# Validate service account key FIRST
+KEY_PATH="/etc/solar-assistant/gcs-key.json"
+KEY_DIR=$(dirname "${KEY_PATH}")
+
+if [ ! -f "${KEY_PATH}" ]; then
+    error "Service account key not found at ${KEY_PATH}
+Please place your GCP service account JSON key there before running this installer."
+fi
+
+# Enforce strict permissions: 0600, owned by root
+PERMS=$(stat -c %a "${KEY_PATH}" 2>/dev/null || stat -f %Lp "${KEY_PATH}")
+OWNER=$(stat -c %U "${KEY_PATH}" 2>/dev/null || stat -f %Su "${KEY_PATH}")
+
+if [ "${PERMS}" != "600" ] || [ "${OWNER}" != "root" ]; then
+    log "Fixing permissive key file permissions..."
+    chmod 600 "${KEY_PATH}"
+    chown root:root "${KEY_PATH}" 2>/dev/null || true
+fi
+
+log "Service account key validated at: ${KEY_PATH}"
+
 # Create script directory
 mkdir -p "${SCRIPT_DIR}"
 cd "${SCRIPT_DIR}"
@@ -67,25 +88,6 @@ log "Created .env with SITE_NAME=${SITE_NAME}"
 
 # Make scripts executable
 chmod +x backup.sh setup.sh
-
-# Prompt for service account key
-KEY_PATH="/etc/solar-assistant/gcs-key.json"
-KEY_DIR=$(dirname "${KEY_PATH}")
-
-log "Service account key required at: ${KEY_PATH}"
-mkdir -p "${KEY_DIR}"
-
-log "Service account key required at: ${KEY_PATH}"
-mkdir -p "${KEY_DIR}"
-
-log "Paste the service account JSON key content below (Ctrl+D to finish):"
-cat > "${KEY_PATH}"
-if [ ! -s "${KEY_PATH}" ]; then
-    rm -f "${KEY_PATH}"
-    error "No valid content was pasted"
-fi
-chmod 600 "${KEY_PATH}"
-log "Service account key saved to ${KEY_PATH}"
 
 log "Running setup..."
 ./setup.sh
