@@ -74,7 +74,8 @@ log "Configuring rclone remote: ${RCLONE_REMOTE}"
 rclone config delete "${RCLONE_REMOTE}" 2>/dev/null || true
 
 rclone config create "${RCLONE_REMOTE}" "google cloud storage" \
-    service_account_file "$KEY_FILE"
+    service_account_file "$KEY_FILE" \
+    bucket_policy_only "true"
 
 log "rclone remote '${RCLONE_REMOTE}' configured"
 
