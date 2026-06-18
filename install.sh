@@ -2,7 +2,7 @@
 
 set -e
 
-REPO="solarexpertscr/workspace"
+REPO="solarexpertscr/influxdb-backup-gcs"
 BRANCH="main"
 SCRIPT_DIR="/opt/influxdb-backup-gcs"
 
@@ -31,7 +31,7 @@ mkdir -p "${SCRIPT_DIR}"
 cd "${SCRIPT_DIR}"
 
 # Download scripts from GitHub
-BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}/scripts/influxdb-backup-gcs"
+BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 
 log "Downloading backup script..."
 curl -fsSL "${BASE_URL}/backup.sh" -o backup.sh

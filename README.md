@@ -47,7 +47,7 @@ GOOGLE_APPLICATION_CREDENTIALS="/etc/solar-assistant/gcs-key.json"
 One-line installer for Solar Assistant deployments:
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/solarexpertscr/workspace/main/scripts/influxdb-backup-gcs/install.sh | sudo bash -s -- your-site-name
+curl -sSL https://raw.githubusercontent.com/solarexpertscr/influxdb-backup-gcs/main/install.sh | sudo bash -s -- your-site-name
 ```
 
 Replace `your-site-name` with the actual site identifier. The installer will:
