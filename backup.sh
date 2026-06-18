@@ -15,11 +15,9 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 source "$ENV_FILE"
 
-# Export GCS credentials
-export GOOGLE_APPLICATION_CREDENTIALS
-
 # Derived values
 GCS_BUCKET="gs://${SITE_NAME}"
+RCLONE_DEST="${RCLONE_REMOTE}:${SITE_NAME}"
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
 BACKUP_NAME="${BACKUP_PREFIX}_${SITE_NAME}_${TIMESTAMP}"
 LOCAL_BACKUP_PATH="${LOCAL_BACKUP_DIR}/${BACKUP_NAME}"
@@ -35,13 +33,8 @@ mkdir -p "${LOCAL_BACKUP_DIR}"
 
 echo "[$(date)] Starting InfluxDB backup for ${SITE_NAME}..."
 
-# Activate service account (ensures auth is fresh)
-if [ -f "$GOOGLE_APPLICATION_CREDENTIALS" ]; then
-    gcloud auth activate-service-account --key-file="$GOOGLE_APPLICATION_CREDENTIALS"
-fi
-
 # Execute InfluxDB backup to local temp directory
-influxd backup -portable "${LOCAL_BACKUP_PATH}"
+influxd backup -portable "${LOCAL_BACKUP_PATH}" 2>&1 | tee -a "$LOG_FILE"
 
 # Check if backup was successful
 if [ ! -d "${LOCAL_BACKUP_PATH}" ]; then
@@ -56,8 +49,8 @@ echo "[$(date)] Backup created successfully. Uploading to GCS..."
 cd "${LOCAL_BACKUP_DIR}"
 tar -czf "${BACKUP_NAME}.tar.gz" "${BACKUP_NAME}"
 
-# Upload to GCS
-gsutil cp "${LOCAL_BACKUP_DIR}/${BACKUP_NAME}.tar.gz" "${GCS_BUCKET}/${BACKUP_NAME}.tar.gz"
+# Upload to GCS via rclone
+rclone copy "${LOCAL_BACKUP_DIR}/${BACKUP_NAME}.tar.gz" "${RCLONE_DEST}/${BACKUP_NAME}.tar.gz" 2>&1 | tee -a "$LOG_FILE"
 
 echo "[$(date)] Backup uploaded to ${GCS_BUCKET}/${BACKUP_NAME}.tar.gz"
 

@@ -1,104 +1,65 @@
-# influxdb-backup-gcs
+# InfluxDB Backup to Google Cloud Storage (rclone)
 
-Automated InfluxDB backup to Google Cloud Storage with lifecycle-managed retention.
+Backs up InfluxDB to GCS using **rclone** instead of `gsutil`/`gcloud` — saves ~350MB of disk space on the Orange Pi eMMC.
 
-## Overview
+## Why rclone?
 
-Backs up InfluxDB using `influxd backup -portable`, uploads a compressed archive to a GCS bucket, and relies on GCS lifecycle rules to automatically delete old backups.
+| | gcloud SDK | rclone |
+|---|---|---|
+| Install size | ~400MB | ~50MB |
+| Dependencies | Python, apt packages | Single binary |
+| Auth | `gcloud auth activate-service-account` | Service account file directly |
+| Upload | `gsutil cp` | `rclone copy` |
 
-Designed to run on Solar Assistant OrangePi instances. Each site gets its own bucket and service account.
+## Setup
 
-## Directory Structure
-
-```
-├── .env.example      # Template for site-specific config
-├── backup.sh         # Backup script (runs from cron)
-├── lifecycle.json     # GCS lifecycle rule template
-├── setup.sh          # One-time setup per site
-└── README.md
-```
-
-## Per-site Configuration (`.env`)
-
-Copy `.env.example` to `.env` and configure:
+1. Place your GCP service account JSON key at `/etc/solar-assistant/gcs-key.json`
+2. Run the installer:
 
 ```bash
-# Site identifier - used as GCS bucket name
-SITE_NAME="solar-assistant"
-
-# Google Cloud Project name
-PROJECT_NAME="solar-assistant-backups"
-
-# Backup prefix (used in filenames)
-BACKUP_PREFIX="influxdb_backup"
-
-# Retention in days (must match lifecycle rule)
-RETENTION_DAYS=3
-
-# Local temp directory
-LOCAL_BACKUP_DIR="/tmp/influxdb_backup"
-
-# Service account key file path (JSON format)
-GOOGLE_APPLICATION_CREDENTIALS="/etc/solar-assistant/gcs-key.json"
+bash install.sh solar-assistant
 ```
 
-## Quick Install
+This will:
+- Install rclone (if not present)
+- Configure the rclone remote with your service account
+- Create the GCS bucket (if it doesn't exist)
+- Set up a daily cron job at 2:00 AM
 
-One-line installer for Solar Assistant deployments:
+## Files
+
+- `install.sh` — one-time installer (downloads scripts, configures rclone, creates bucket)
+- `setup.sh` — rclone setup (called by install.sh)
+- `backup.sh` — the backup script (runs daily via cron)
+- `lifecycle.json` — bucket auto-deletion rules (3 days retention)
+
+## Manual backup test
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/solarexpertscr/influxdb-backup-gcs/main/install.sh | sudo bash -s -- your-site-name
+bash /opt/influxdb-backup-gcs/backup.sh
 ```
 
-Replace `your-site-name` with the actual site identifier. The installer will:
-
-1. Download scripts to `/opt/influxdb-backup-gcs/`
-2. Generate `.env` with the site name
-3. Prompt you to paste the service account JSON key directly (paste contents, then Ctrl+D)
-4. Run setup (install gsutil, create bucket, set lifecycle, add cron)
-
-The service account key is saved to `/etc/solar-assistant/gcs-key.json` with restrictive permissions (600).
-
-## Manual Setup
-
-1. Copy the entire directory to the target machine
-2. Create `.env` from `.env.example`
-3. Run setup — it will prompt you to paste the service account JSON key directly:
+## Logs
 
 ```bash
-chmod +x setup.sh backup.sh
-./setup.sh
+cat /var/log/influxdb-backup.log
 ```
 
-Setup will:
-- Install Google Cloud SDK if not present
-- Create bucket `gs://<SITE_NAME>` in the `solar-assistant-backups` project
-- Apply GCS lifecycle rules (auto-delete after `RETENTION_DAYS`)
-- Install a cron job (daily at 2:00 AM)
+## Switching from the old version
 
-## Manual Backup
+If you had the previous `gsutil` version installed:
 
 ```bash
-./backup.sh
+# 1. Remove old crontab
+crontab -l | grep -v "influxdb_backup" | crontab -
+
+# 2. Remove old scripts
+rm -rf /opt/influxdb-backup-gcs
+
+# 3. Optional: remove gcloud SDK to free ~400MB
+apt-get remove --purge google-cloud-cli
+apt-get autoremove
+
+# 4. Install new version
+bash <(curl -fsSL https://raw.githubusercontent.com/solarexpertscr/influxdb-backup-gcs/main/install.sh) solar-assistant
 ```
-
-## GCS Bucket Naming
-
-Buckets are named `gs://<SITE_NAME>` (e.g., `gs://solar-assistant`). Each site gets its own bucket and its own service account for isolation.
-
-## Lifecycle
-
-GCS lifecycle rules are applied during setup. Objects older than `RETENTION_DAYS` are automatically deleted. The lifecycle rule is configured per-bucket during `setup.sh`.
-
-## Service Account Permissions
-
-Each site's service account needs:
-- **Storage Object Admin** on `gs://<SITE_NAME>`
-- **Storage Viewer** on the project (for bucket creation during setup)
-
-## Requirements
-
-- `influxd` CLI available (version 1.x with `-portable` flag)
-- `bash` 4+
-- `gsutil` (installed automatically by `setup.sh` if missing)
-- Network access to GCS

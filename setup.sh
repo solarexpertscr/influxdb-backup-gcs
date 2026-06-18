@@ -10,6 +10,8 @@ fi
 
 source .env
 
+SCRIPT_DIR="/opt/influxdb-backup-gcs"
+
 log() {
     echo -e "\033[32m[INFO]\033[0m $1"
 }
@@ -50,51 +52,48 @@ log "Service account key validated at: $KEY_FILE"
 # Setup directories
 mkdir -p "$LOCAL_BACKUP_DIR"
 
-# Install Google Cloud SDK if not present
-if ! command -v gcloud &> /dev/null; then
-    log "Installing Google Cloud SDK..."
-    apt-get update -qq
-    apt-get install -y apt-transport-https ca-certificates gnupg curl
-    
-    curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
-    
-    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list
-    
-    apt-get update -qq
-    apt-get install -y google-cloud-cli
-    
-    log "Google Cloud SDK installed"
+# Install rclone if not present (~50MB single binary, vs ~400MB for google-cloud-sdk)
+if ! command -v rclone &> /dev/null; then
+    log "Installing rclone..."
+    curl https://rclone.org/install.sh | bash
+    log "rclone installed ($(du -sh $(which rclone) | cut -f1))"
 else
-    log "Google Cloud SDK already installed"
+    log "rclone already installed"
 fi
 
-# Authenticate with service account
-log "Authenticating with GCP..."
-gcloud auth activate-service-account --key-file="$KEY_FILE"
+# Configure rclone remote with service account
+log "Configuring rclone remote: ${RCLONE_REMOTE}"
 
-# Set project
-gcloud config set project "$PROJECT_NAME"
-log "Project set to: $PROJECT_NAME"
+# Remove existing remote if present (to avoid conflicts)
+rclone config delete "${RCLONE_REMOTE}" 2>/dev/null || true
 
-# Check if bucket exists
-if gsutil ls -p "$PROJECT_NAME" | grep -q "^gs://${SITE_NAME}/$"; then
-    log "Bucket gs://$SITE_NAME already exists"
+rclone config create "${RCLONE_REMOTE}" google \
+    service_account_file "$KEY_FILE"
+
+log "rclone remote '${RCLONE_REMOTE}' configured"
+
+# Check if bucket exists and create if needed
+log "Checking if bucket gs://${SITE_NAME} exists..."
+if rclone lsd "${RCLONE_REMOTE}:${SITE_NAME}" &>/dev/null; then
+    log "Bucket gs://${SITE_NAME} already exists"
 else
-    # Create GCS bucket
-    log "Creating GCS bucket: gs://$SITE_NAME"
-    gsutil mb -p "$PROJECT_NAME" "gs://$SITE_NAME"
+    log "Creating GCS bucket: gs://${SITE_NAME}"
+    rclone mkdir "${RCLONE_REMOTE}:${SITE_NAME}"
     
-    # Apply lifecycle rules
-    if [ -f "lifecycle.json" ]; then
-        log "Applying lifecycle rules..."
-        gsutil lifecycle set lifecycle.json "gs://$SITE_NAME"
+    if [ $? -eq 0 ]; then
+        log "Bucket created successfully"
     else
-        log "Warning: lifecycle.json not found, skipping lifecycle configuration"
+        error "Failed to create bucket. Check your service account permissions."
     fi
 fi
 
-# Install cron job
-CRON_CMD="$LOCAL_BACKUP_DIR/backup.sh >> $LOCAL_BACKUP_DIR/backup.log 2>&1"
+# Note about lifecycle rules (one-time setup)
+log "NOTE: To set auto-deletion after ${RETENTION_DAYS} days, apply lifecycle.json via:"
+log "  GCP Console → Storage → ${SITE_NAME} → Lifecycle → Add rule"
+log "  Or: gsutil lifecycle set ${SCRIPT_DIR}/lifecycle.json gs://${SITE_NAME}"
+
+# Install cron job (use SCRIPT_DIR, not LOCAL_BACKUP_DIR which is in /tmp)
+CRON_CMD="${SCRIPT_DIR}/backup.sh >> /var/log/influxdb-backup.log 2>&1"
 CRON_SCHEDULE="0 2 * * *"
 
 # Remove existing cron job if present
@@ -106,10 +105,15 @@ CRON_SCHEDULE="0 2 * * *"
 log "Cron job installed: $CRON_SCHEDULE"
 
 # Make backup script executable
-chmod +x "$LOCAL_BACKUP_DIR/backup.sh" 2>/dev/null || true
+chmod +x "$SCRIPT_DIR/backup.sh"
 
-log "Setup complete!"
-log "Backup will run daily at 2:00 AM"
-log "Backup location: gs://$SITE_NAME"
-log "Logs: $LOCAL_BACKUP_DIR/backup.log"
-log "Test backup: bash $LOCAL_BACKUP_DIR/backup.sh"
+log ""
+log "========================================="
+log " Setup complete! (rclone version)"
+log "========================================="
+log " rclone:  ~50MB (was ~400MB gcloud SDK)"
+log " Backup:  daily at 2:00 AM"
+log " Bucket:  gs://$SITE_NAME"
+log " Logs:    /var/log/influxdb-backup.log"
+log " Test:    bash $SCRIPT_DIR/backup.sh"
+log "========================================="

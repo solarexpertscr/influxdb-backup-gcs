@@ -54,10 +54,10 @@ cd "${SCRIPT_DIR}"
 # Download scripts from GitHub
 BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 
-log "Downloading backup script..."
+log "Downloading rclone backup script..."
 curl -fsSL "${BASE_URL}/backup.sh" -o backup.sh
 
-log "Downloading setup script..."
+log "Downloading rclone setup script..."
 curl -fsSL "${BASE_URL}/setup.sh" -o setup.sh
 
 log "Downloading lifecycle config..."
@@ -80,6 +80,9 @@ RETENTION_DAYS=3
 # Local temp directory
 LOCAL_BACKUP_DIR="/tmp/influxdb_backup"
 
+# Rclone remote name (configured in setup.sh)
+RCLONE_REMOTE="gcs"
+
 # Service account key file path (JSON format)
 GOOGLE_APPLICATION_CREDENTIALS="/etc/solar-assistant/gcs-key.json"
 EOF
@@ -89,10 +92,10 @@ log "Created .env with SITE_NAME=${SITE_NAME}"
 # Make scripts executable
 chmod +x backup.sh setup.sh
 
-log "Running setup..."
+log "Running rclone setup..."
 ./setup.sh
 
-log "Installation complete"
+log "Installation complete (rclone version)"
 log "Backup script: ${SCRIPT_DIR}/backup.sh"
 log "Setup script:  ${SCRIPT_DIR}/setup.sh"
 log "Config:        ${SCRIPT_DIR}/.env"
