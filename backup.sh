@@ -26,34 +26,29 @@ log_error() {
 # ============================================================================
 
 check_for_update() {
-    # Fetch the latest backup.sh from GitHub
     local temp_script
     temp_script=$(mktemp)
     
     if curl -fsSL "$GITHUB_RAW_URL" -o "$temp_script" 2>/dev/null; then
-        # Extract version from downloaded script
         local remote_version
         remote_version=$(grep -oP 'SCRIPT_VERSION="\K[^"]+' "$temp_script" 2>/dev/null || echo "unknown")
-        
-        # Clean up temp file
         rm -f "$temp_script"
         
         if [[ "$remote_version" == "unknown" ]]; then
-            log "Could not determine remote version"
             return 1
         fi
         
         echo "$remote_version"
         return 0
     else
-        log "Failed to check for updates"
         rm -f "$temp_script"
         return 1
     fi
 }
 
-perform_update() {
-    local script_dir="$SCRIPT_DIR"
+do_update() {
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     local backup_script="$script_dir/backup.sh"
     local temp_script
     temp_script=$(mktemp)
@@ -64,7 +59,7 @@ perform_update() {
     if ! curl -fsSL "$GITHUB_RAW_URL" -o "$temp_script"; then
         log_error "Failed to download latest version"
         rm -f "$temp_script"
-        exit 1
+        return 1
     fi
     
     # Extract remote version
@@ -74,14 +69,14 @@ perform_update() {
     if [[ "$remote_version" == "unknown" ]]; then
         log_error "Downloaded script has no version tag"
         rm -f "$temp_script"
-        exit 1
+        return 1
     fi
     
     # Check if update is needed
     if [[ "$remote_version" == "$SCRIPT_VERSION" ]]; then
         log "Already at latest version: $SCRIPT_VERSION"
         rm -f "$temp_script"
-        exit 0
+        return 0
     fi
     
     log "New version available: $remote_version (current: $SCRIPT_VERSION)"
@@ -90,7 +85,7 @@ perform_update() {
     if ! bash -n "$temp_script"; then
         log_error "Downloaded script has syntax errors - aborting update"
         rm -f "$temp_script"
-        exit 1
+        return 1
     fi
     
     log "Syntax check passed"
@@ -100,19 +95,12 @@ perform_update() {
     cp "$backup_script" "$backup_file"
     log "Created backup: $(basename "$backup_file")"
     
-    # Verify backup was created
-    if [[ ! -f "$backup_file" ]]; then
-        log_error "Failed to create backup - aborting update"
-        rm -f "$temp_script"
-        exit 1
-    fi
-    
     # Atomic swap
     if ! cp "$temp_script" "$backup_script"; then
         log_error "Failed to install new version - attempting rollback"
         cp "$backup_file" "$backup_script" || log_error "Rollback failed!"
         rm -f "$temp_script"
-        exit 1
+        return 1
     fi
     
     # Preserve executable permission
@@ -123,15 +111,47 @@ perform_update() {
     log "Previous version saved as: $(basename "$backup_file")"
     log "To rollback manually: cp $backup_file $backup_script"
     
-    exit 0
+    return 0
 }
-
-# ============================================================================
-# Main Script Logic
-# ============================================================================
 
 # Determine script directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ============================================================================
+# Handle --update and --auto-update flags (exit before backup logic)
+# ============================================================================
+
+case "${1:-}" in
+    --update)
+        do_update
+        exit $?
+        ;;
+    --auto-update)
+        log "Running auto-update (non-interactive)..."
+        if do_update; then
+            log "✓ Auto-update complete"
+        else
+            log "Auto-update failed or skipped"
+        fi
+        exit 0
+        ;;
+    --check-update)
+        REMOTE_VER=$(check_for_update 2>/dev/null || echo "")
+        if [[ -n "$REMOTE_VER" && "$REMOTE_VER" != "$SCRIPT_VERSION" ]]; then
+            log "New version available: $REMOTE_VER (current: $SCRIPT_VERSION)"
+            log "Run: $0 --update to install"
+            exit 1
+        else
+            log "Up to date: $SCRIPT_VERSION"
+            exit 0
+        fi
+        ;;
+esac
+
+# ============================================================================
+# Main Backup Logic
+# ============================================================================
+
 ENV_FILE="${SCRIPT_DIR}/.env"
 
 # Load environment variables
@@ -140,15 +160,9 @@ if [ ! -f "$ENV_FILE" ]; then
     exit 1
 fi
 
-# Source environment
 set -a
 source "$ENV_FILE"
 set +a
-
-# Handle --update flag
-if [[ "${1:-}" == "--update" ]]; then
-    perform_update
-fi
 
 # Validate required configuration
 if [[ -z "${SITE_NAME:-}" ]]; then
@@ -156,9 +170,15 @@ if [[ -z "${SITE_NAME:-}" ]]; then
     exit 1
 fi
 
-if [[ -z "${RCLONE_REMOTE:-}" ]]; then
-    log_error "RCLONE_REMOTE not set in $ENV_FILE"
-    exit 1
+# Support both legacy RCLONE_REMOTE and new RCLONE_REMOTE_NAME
+if [[ -n "${RCLONE_REMOTE_NAME:-}" ]]; then
+    RCLONE_REMOTE="${RCLONE_REMOTE_NAME}"
+elif [[ -z "${RCLONE_REMOTE:-}" ]]; then
+    RCLONE_REMOTE="gcs"
+fi
+# Ensure RCLONE_REMOTE ends with colon
+if [[ "$RCLONE_REMOTE" != *: ]]; then
+    RCLONE_REMOTE="${RCLONE_REMOTE}:"
 fi
 
 # Set defaults
@@ -170,7 +190,7 @@ REQUIRED_MB="${REQUIRED_MB:-1000}"
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 BACKUP_NAME="${SITE_NAME}_${TIMESTAMP}"
 LOCAL_BACKUP_PATH="${LOCAL_BACKUP_DIR}/${BACKUP_NAME}"
-RCLONE_DEST="${RCLONE_REMOTE}:${SITE_NAME}/backups/"
+RCLONE_DEST="${RCLONE_REMOTE}${SITE_NAME}/backups/"
 
 # Ensure directories exist
 mkdir -p "$LOCAL_BACKUP_DIR"
@@ -182,7 +202,7 @@ log "=========================================="
 
 # Pre-flight checks
 # 1. Check local backup size (orphaned backups from failed runs)
-LOCAL_BACKUP_SIZE=$(du -sm "$LOCAL_BACKUP_DIR" 2>/dev/null | awk '{print $1}')
+LOCAL_BACKUP_SIZE=$(du -sm "$LOCAL_BACKUP_DIR" 2>/dev/null | awk '{print $1}' || echo 0)
 if [[ "$LOCAL_BACKUP_SIZE" -gt "$REQUIRED_MB" ]]; then
     log "⚠ Local backup directory is ${LOCAL_BACKUP_SIZE}MB (limit: ${REQUIRED_MB}MB)"
     log "This suggests previous uploads failed. Cleaning up old backups..."
@@ -190,7 +210,7 @@ if [[ "$LOCAL_BACKUP_SIZE" -gt "$REQUIRED_MB" ]]; then
     # Remove old backups but keep the most recent one
     find "$LOCAL_BACKUP_DIR" -maxdepth 1 -type d -name "${SITE_NAME}_*" -mtime +1 | sort -r | tail -n +2 | xargs rm -rf 2>/dev/null || true
     
-    NEW_SIZE=$(du -sm "$LOCAL_BACKUP_DIR" 2>/dev/null | awk '{print $1}')
+    NEW_SIZE=$(du -sm "$LOCAL_BACKUP_DIR" 2>/dev/null | awk '{print $1}' || echo 0)
     log "Cleaned up. Local backup size: ${NEW_SIZE}MB"
 fi
 
@@ -213,7 +233,6 @@ if influxd backup \
     log "✓ InfluxDB backup created successfully"
 else
     log_error "InfluxDB backup failed"
-    # Clean up the failed backup directory
     rm -rf "$LOCAL_BACKUP_PATH"
     exit 1
 fi
@@ -227,7 +246,7 @@ if tar -czf "$ARCHIVE_PATH" -C "$LOCAL_BACKUP_DIR" "$(basename "$LOCAL_BACKUP_PA
     ARCHIVE_SIZE=$(du -h "$ARCHIVE_PATH" | awk '{print $1}')
     log "Archive size: ${ARCHIVE_SIZE}"
     
-    # Remove uncompressed backup directory
+    # Remove uncompressed backup directory immediately after compression
     rm -rf "$LOCAL_BACKUP_PATH"
     log "✓ Uncompressed backup removed"
 else
@@ -259,13 +278,11 @@ fi
 rm -f "$ARCHIVE_PATH"
 log "✓ Local archive removed"
 
-# Check for script updates (non-blocking)
-if check_for_update > /dev/null 2>&1; then
-    REMOTE_VER=$(check_for_update)
-    if [[ "$REMOTE_VER" != "$SCRIPT_VERSION" ]]; then
-        log "ℹ New version available: $REMOTE_VER (current: $SCRIPT_VERSION)"
-        log "  Run: $0 --update"
-    fi
+# Check for script updates (non-blocking, end of run)
+REMOTE_VER=$(check_for_update 2>/dev/null || echo "")
+if [[ -n "$REMOTE_VER" && "$REMOTE_VER" != "$SCRIPT_VERSION" ]]; then
+    log "ℹ New version available: $REMOTE_VER (current: $SCRIPT_VERSION)"
+    log "  Run: $0 --update or wait for weekly auto-update cron job"
 fi
 
 log "✓ Backup completed successfully"
