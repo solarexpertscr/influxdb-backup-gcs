@@ -31,7 +31,7 @@ This will:
 - `install.sh` — one-time installer (downloads scripts, configures rclone, creates bucket)
 - `setup.sh` — rclone setup (called by install.sh)
 - `backup.sh` — the backup script (runs daily via cron)
-- `lifecycle.json` — bucket auto-deletion rules (3 days retention)
+- `lifecycle.json` — bucket auto-deletion rules (30 days retention)
 
 ## Manual backup test
 
