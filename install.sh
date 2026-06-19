@@ -54,7 +54,7 @@ cd "${SCRIPT_DIR}"
 # Download scripts from GitHub
 BASE_URL="https://raw.githubusercontent.com/${REPO}/${BRANCH}"
 
-log "Downloading rclone backup script..."
+log "Downloading backup script..."
 curl -fsSL "${BASE_URL}/backup.sh" -o backup.sh
 
 log "Downloading rclone setup script..."
@@ -71,17 +71,20 @@ SITE_NAME="${SITE_NAME}"
 # Google Cloud Project name
 PROJECT_NAME="solar-assistant-backups"
 
-# Backup prefix (used in filenames)
-BACKUP_PREFIX="influxdb_backup"
-
 # Retention in days (must match lifecycle rule)
-RETENTION_DAYS=3
+RETENTION_DAYS=30
 
 # Local temp directory
 LOCAL_BACKUP_DIR="/tmp/influxdb_backup"
 
+# Minimum required disk space in MB
+REQUIRED_MB=1000
+
 # Rclone remote name (configured in setup.sh)
 RCLONE_REMOTE="gcs"
+
+# Rclone config file path
+RCLONE_CONFIG="/etc/rclone.conf"
 
 # Service account key file path (JSON format)
 GOOGLE_APPLICATION_CREDENTIALS="/etc/solar-assistant/gcs-key.json"
@@ -95,7 +98,43 @@ chmod +x backup.sh setup.sh
 log "Running rclone setup..."
 ./setup.sh
 
-log "Installation complete (rclone version)"
-log "Backup script: ${SCRIPT_DIR}/backup.sh"
-log "Setup script:  ${SCRIPT_DIR}/setup.sh"
-log "Config:        ${SCRIPT_DIR}/.env"
+# ============================================================================
+# Cron Jobs
+# ============================================================================
+
+log "Setting up cron jobs..."
+
+# Daily backup at 2:00 AM
+CRON_BACKUP="0 2 * * * /bin/bash ${SCRIPT_DIR}/backup.sh >> /var/log/influxdb-backup.log 2>&1"
+
+# Weekly auto-update check on Sundays at 3:00 AM
+CRON_UPDATE="0 3 * * 0 /bin/bash ${SCRIPT_DIR}/backup.sh --update >> /var/log/influxdb-backup.log 2>&1"
+
+# Get existing crontab (ignore errors if none exists)
+EXISTING_CRON=$(crontab -l 2>/dev/null || true)
+
+# Remove old entries for our scripts (avoid duplicates)
+EXISTING_CRON=$(echo "$EXISTING_CRON" | grep -v "${SCRIPT_DIR}/backup.sh" || true)
+
+# Install new crontab with both jobs
+(echo "$EXISTING_CRON"; echo "$CRON_BACKUP"; echo "$CRON_UPDATE") | crontab -
+
+log "Cron jobs installed:"
+log "  Backup:  daily at 2:00 AM"
+log "  Update:  weekly on Sundays at 3:00 AM"
+
+# Verify crontab
+log "Current crontab:"
+crontab -l | grep "${SCRIPT_DIR}/backup.sh" | sed 's/^/  /'
+
+log ""
+log "========================================="
+log " Setup complete! (rclone version)"
+log "========================================="
+log " rclone:  ~50MB (was ~400MB gcloud SDK)"
+log " Backup:  daily at 2:00 AM"
+log " Update:  weekly on Sundays at 3:00 AM"
+log " Bucket:  gs://$SITE_NAME"
+log " Logs:    /var/log/influxdb-backup.log"
+log " Test:    bash $SCRIPT_DIR/backup.sh --update"
+log "========================================="
