@@ -19,6 +19,9 @@ set -euo pipefail
 # Set PATH explicitly for cron/sudo compatibility
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+# Rclone config path (setup.sh writes to /etc/rclone.conf)
+export RCLONE_CONFIG="/etc/rclone.conf"
+
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
 log_error() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >&2; }
 
