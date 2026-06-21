@@ -1,65 +1,107 @@
-# InfluxDB Backup to Google Cloud Storage (rclone)
+# InfluxDB Backup to GCS — Shard-Based
 
-Backs up InfluxDB to GCS using **rclone** instead of `gsutil`/`gcloud` — saves ~350MB of disk space on the Orange Pi eMMC.
+Backs up InfluxDB to Google Cloud Storage using **shard-level sync** with rclone.
 
-## Why rclone?
+Instead of uploading a full tarball of the entire database every day, this approach uploads individual shard files — rclone's `--update` flag automatically skips frozen shards that haven't changed, and only re-uploads the active shard.
 
-| | gcloud SDK | rclone |
+## Why shard-based?
+
+| | Old approach (daily tarball) | Shard-based |
 |---|---|---|
-| Install size | ~400MB | ~50MB |
-| Dependencies | Python, apt packages | Single binary |
-| Auth | `gcloud auth activate-service-account` | Service account file directly |
-| Upload | `gsutil cp` | `rclone copy` |
+| Daily upload | Entire DB compressed | Only changed shards |
+| Upload time | Minutes/hours (grows with DB) | Seconds (constant) |
+| GCS storage | N copies × 30-day lifecycle | One cumulative set, kept forever |
+| Restore | Extract tar then restore | Pull from GCS, restore directly |
+| Retention | 30 days max | Indefinite history |
 
-## Setup
+## Strategy
 
-1. Place your GCP service account JSON key at `/etc/solar-assistant/gcs-key.json`
-2. Run the installer:
-
-```bash
-bash install.sh solar-assistant
-```
-
-This will:
-- Install rclone (if not present)
-- Configure the rclone remote with your service account
-- Create the GCS bucket (if it doesn't exist)
-- Set up a daily cron job at 2:00 AM
+- **InfluxDB** splits data into time-windowed **shards** (typically 1 week each).
+- The **active shard** grows as new data arrives; it re-uploads daily.
+- Once a shard window closes (~7 days), the shard is **frozen** and never re-uploaded.
+- rclone compares file size/modification time and only transfers what changed.
 
 ## Files
 
-- `install.sh` — one-time installer (downloads scripts, configures rclone, creates bucket)
-- `setup.sh` — rclone setup (called by install.sh)
-- `backup.sh` — the backup script (runs daily via cron)
-- `lifecycle.json` — bucket auto-deletion rules (30 days retention)
+| File | Purpose |
+|---|---|
+| `backup.sh` | Creates a `-portable` backup and syncs shard files to GCS |
+| `restore.sh` | Pulls shards from GCS and runs `influxd restore` |
+| `install.sh` | Downloads scripts, creates `.env`, runs `setup.sh` |
+| `setup.sh` | Configures rclone, creates bucket, applies lifecycle, installs cron |
+| `lifecycle.json` | GCS bucket lifecycle: transition to NEARLINE after 30 days |
 
-## Manual backup test
+## Setup
 
 ```bash
-bash /opt/influxdb-backup-gcs/backup.sh
+# 1. Place your GCP service account key
+sudo cp /path/to/key.json /etc/solar-assistant/gcs-key.json
+sudo chmod 600 /etc/solar-assistant/gcs-key.json
+
+# 2. Run the installer (creates bucket, configures rclone, installs cron)
+curl -fsSL https://raw.githubusercontent.com/solarexpertscr/influxdb-backup-gcs/main/install.sh -o /tmp/install.sh
+sudo bash /tmp/install.sh solar-assistant
+```
+
+## Manual backup
+
+```bash
+sudo bash /opt/influxdb-backup-gcs/backup.sh
+```
+
+## Restore
+
+```bash
+# Dry-run: show what would be restored
+sudo bash /opt/influxdb-backup-gcs/restore.sh --dry-run
+
+# Actual restore
+sudo bash /opt/influxdb-backup-gcs/restore.sh
+
+# Restore to a custom location
+sudo bash /opt/influxdb-backup-gcs/restore.sh --restore-dir /custom/path
+
+# List what's on GCS
+sudo bash /opt/influxdb-backup-gcs/restore.sh --list
 ```
 
 ## Logs
 
 ```bash
-cat /var/log/influxdb-backup.log
+tail -f /var/log/influxdb-backup.log
 ```
 
-## Switching from the old version
+## Cron schedule
 
-If you had the previous `gsutil` version installed:
+| When | What |
+|---|---|
+| `0 2 * * *` | Daily backup |
+| `0 3 * * 0` | Sunday auto-update (pulls latest backup.sh from GitHub) |
+
+## GCS Lifecycle
+
+`lifecycle.json` transitions objects from **STANDARD** to **NEARLINE** 30 days after last modification. This means:
+
+- The active shard (re-written daily) stays on Standard (fast access)
+- Frozen shards automatically move to Nearline (~60% cheaper) after 30 days idle
+- All history is kept indefinitely — no deletion
+
+Apply it via GCP Console or (if `gsutil` is installed):
 
 ```bash
-# 1. Remove old crontab
-crontab -l | grep -v "influxdb_backup" | crontab -
+gsutil lifecycle set /opt/influxdb-backup-gcs/lifecycle.json gs://BUCKET_NAME
+```
 
-# 2. Remove old scripts
-rm -rf /opt/influxdb-backup-gcs
+## Upgrade from old tarball version
 
-# 3. Optional: remove gcloud SDK to free ~400MB
-apt-get remove --purge google-cloud-cli
-apt-get autoremove
+The old backup.sh uploaded a full `.tar.gz` daily. The new version uploads shards. If you had the old version installed:
 
-# 4. Install new version
-bash <(curl -fsSL https://raw.githubusercontent.com/solarexpertscr/influxdb-backup-gcs/main/install.sh) solar-assistant
+1. Old backups on GCS are still valid — they're just full tarballs under `backups/`
+2. The new version writes shard files under `influxdb/` — different prefix, no conflict
+3. Run `install.sh` as above to upgrade in place
+
+## Self-update
+
+```bash
+sudo bash /opt/influxdb-backup-gcs/backup.sh --update
 ```
