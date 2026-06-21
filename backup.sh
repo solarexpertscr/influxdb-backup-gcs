@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.0.6"
+SCRIPT_VERSION="3.1.0"
 GITHUB_RAW_URL="https://raw.githubusercontent.com/solarexpertscr/influxdb-backup-gcs/main/backup.sh"
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -154,18 +154,30 @@ if [[ -z "${INFLUXDB_BACKUP_NO_AUTOUPDATE:-}" ]]; then
 fi
 
 ###############################################################################
-# Pre-flight: disk space
+# Pre-flight: disk space check + auto-cleanup
 ###############################################################################
 
 mkdir -p "${LOCAL_BACKUP_DIR}"
-AVAILABLE_SPACE=$(df -m "${LOCAL_BACKUP_DIR}" | awk 'NR==2 {print $4}')
 REQUIRED_MB="${REQUIRED_MB:-1000}"
+AVAILABLE_SPACE=$(df -m "${LOCAL_BACKUP_DIR}" | awk 'NR==2 {print $4}')
 
 if (( AVAILABLE_SPACE < REQUIRED_MB )); then
-    log "ERROR: Insufficient disk space: ${AVAILABLE_SPACE}MB available (need ${REQUIRED_MB}MB)"
-    exit 1
+    log "⚠ Low disk space: ${AVAILABLE_SPACE}MB available (need ${REQUIRED_MB}MB)"
+    log "Running cleanup.sh to reclaim space..."
+    if bash "${SCRIPT_DIR}/cleanup.sh" 2>&1 | while IFS= read -r line; do log "[cleanup] $line"; done; then
+        AVAILABLE_SPACE=$(df -m "${LOCAL_BACKUP_DIR}" | awk 'NR==2 {print $4}')
+        log "Post-cleanup: ${AVAILABLE_SPACE}MB free"
+        if (( AVAILABLE_SPACE < REQUIRED_MB )); then
+            log "ERROR: Still insufficient after cleanup: ${AVAILABLE_SPACE}MB (need ${REQUIRED_MB}MB)"
+            exit 1
+        fi
+        log "✓ Cleanup reclaimed enough space"
+    else
+        log "ERROR: cleanup.sh failed"
+        exit 1
+    fi
 fi
-log "✓ Disk space check passed: ${AVAILABLE_SPACE}MB available"
+log "✓ Disk space OK: ${AVAILABLE_SPACE}MB available"
 
 ###############################################################################
 # InfluxDB portable backup (shards + manifest)
@@ -249,6 +261,30 @@ REMOTE_VER=$(check_for_update 2>/dev/null || echo "")
 if [[ -n "$REMOTE_VER" && "$REMOTE_VER" != "$SCRIPT_VERSION" ]]; then
     log "ℹ New version available: $REMOTE_VER (current: $SCRIPT_VERSION)"
     log "  Run: $0 --update or wait for weekly auto-update cron job"
+fi
+
+###############################################################################
+# Write status.json (uploaded on next rclone sync)
+###############################################################################
+
+STATUS_FILE="${LOCAL_BACKUP_DIR}/status.json"
+cat > "$STATUS_FILE" <<EOF
+{
+  "hostname": "$(hostname -s 2>/dev/null || echo unknown)",
+  "site": "${SITE_NAME}",
+  "version": "${SCRIPT_VERSION}",
+  "last_backup": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "free_mb": ${AVAILABLE_SPACE},
+  "shard_count": ${SHARD_COUNT},
+  "backup_size_mb": ${BACKUP_SIZE},
+  "upload_duration_s": $(( UPLOAD_END - UPLOAD_START ))
+}
+EOF
+log "✓ Status written to ${STATUS_FILE}"
+
+# Upload status.json + any lingering stale files to GCS
+if rclone copy "$STATUS_FILE" "${RCLONE_DEST}status.json" 2>/dev/null; then
+    log "✓ Status uploaded to GCS"
 fi
 
 log "=========================================="

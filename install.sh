@@ -74,6 +74,11 @@ download "backup.sh"
 download "restore.sh"
 download "setup.sh"
 
+curl -fsSL "${GITHUB_RAW_URL}/cleanup.sh" -o "${INSTALL_DIR}/cleanup.sh" 2>/dev/null && \
+    chmod +x "${INSTALL_DIR}/cleanup.sh" && \
+    log "✓ cleanup.sh downloaded" || \
+    log "⚠ Warning: cleanup.sh download failed (not critical)"
+
 log "Downloading lifecycle.json..."
 if curl -fsSL "${GITHUB_RAW_URL}/lifecycle.json" -o "${INSTALL_DIR}/lifecycle.json"; then
     log "✓ lifecycle.json downloaded"
