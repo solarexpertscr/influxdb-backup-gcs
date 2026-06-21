@@ -5,8 +5,8 @@ set -euo pipefail
 # ============================================================================
 # Setup Script for InfluxDB Shard-Based Backup to GCS
 # ============================================================================
-# Configures rclone, creates the GCS bucket, applies the lifecycle rule,
-# and installs cron jobs. Called by install.sh or run standalone.
+# Configures rclone, creates the GCS bucket, and installs cron jobs.
+# Called by install.sh or run standalone.
 # ============================================================================
 
 # Colors
@@ -126,30 +126,6 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Apply lifecycle rule: transition to NEARLINE after 30 days
-# ---------------------------------------------------------------------------
-
-LIFECYCLE_FILE="${SCRIPT_DIR}/lifecycle.json"
-
-if [ -f "$LIFECYCLE_FILE" ]; then
-    log "Applying GCS bucket lifecycle rule: transition to NEARLINE after 30 days..."
-    # Use gsutil if available (fastest path), otherwise fall back to rclone backend command
-    if command -v gsutil &> /dev/null; then
-        gsutil lifecycle set "$LIFECYCLE_FILE" "gs://${SITE_NAME}"
-        log "✓ Lifecycle applied via gsutil"
-    else
-        # rclone doesn't natively set lifecycle rules; emit a reminder
-        warn "rclone cannot set lifecycle rules directly."
-        warn "To apply the lifecycle rule, either install gsutil or visit:"
-        warn "  GCP Console → Storage → Bucket '${SITE_NAME}' → Lifecycle"
-        warn "  Upload lifecycle.json found at: ${LIFECYCLE_FILE}"
-    fi
-else
-    warn "lifecycle.json not found in ${SCRIPT_DIR}"
-    warn "The bucket will retain all objects on Standard storage."
-fi
-
-# ---------------------------------------------------------------------------
 # Install cron jobs
 # ---------------------------------------------------------------------------
 
@@ -157,9 +133,11 @@ log "Setting up cron jobs..."
 
 BACKUP_CMD="${SCRIPT_DIR}/backup.sh >> /var/log/influxdb-backup.log 2>&1"
 AUTOUPDATE_CMD="${SCRIPT_DIR}/backup.sh --auto-update >> /var/log/influxdb-backup.log 2>&1"
+CLEANUP_CMD="${SCRIPT_DIR}/cleanup.sh >> /var/log/influxdb-backup.log 2>&1"
+STATUS_CMD="${SCRIPT_DIR}/backup.sh --status-only >> /var/log/influxdb-backup.log 2>&1"
 
 # Remove any existing entries for this script
-(crontab -l 2>/dev/null | grep -v "${SCRIPT_DIR}/backup.sh") | crontab -
+(crontab -l 2>/dev/null | grep -v "${SCRIPT_DIR}/backup.sh" | grep -v "${SCRIPT_DIR}/cleanup.sh") | crontab -
 
 # Add new entries
 crontab_line() {
@@ -172,9 +150,17 @@ crontab_line "0 2 * * * ${BACKUP_CMD}"
 # Weekly auto-update of backup script: Sunday 3 AM
 crontab_line "0 3 * * 0 ${AUTOUPDATE_CMD}"
 
+# Daily cleanup: 4 AM
+crontab_line "0 4 * * * ${CLEANUP_CMD}"
+
+# Hourly status upload
+crontab_line "0 * * * * ${STATUS_CMD}"
+
 log "✓ Cron jobs installed:"
 log "  - Daily backup:       0 2 * * *"
 log "  - Weekly auto-update: 0 3 * * 0"
+log "  - Daily cleanup:      0 4 * * *"
+log "  - Hourly status:      0 * * * *"
 
 # ---------------------------------------------------------------------------
 # Permissions
@@ -198,7 +184,6 @@ log " rclone:  lightweight single-binary transport"
 log " Strategy: upload changed shards only"
 log "          frozen shards uploaded once, active shard updated daily"
 log " Bucket:  gs://${SITE_NAME}"
-log " Lifecycle: transition to NEARLINE after 30 days"
 log " Backup:  daily at 2:00 AM"
 log " Logs:    /var/log/influxdb-backup.log"
 log ""

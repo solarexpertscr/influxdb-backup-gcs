@@ -55,6 +55,24 @@ if command -v apt-get >/dev/null 2>&1; then
     log "  ✓ apt cache cleared"
 fi
 
+log "Installing logrotate config..."
+if [[ ! -f /etc/logrotate.d/influxdb-backup ]]; then
+    cat > /etc/logrotate.d/influxdb-backup <<EOF
+/var/log/influxdb-backup.log {
+    daily
+    rotate 7
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0644 root root
+}
+EOF
+    log "  ✓ logrotate config installed"
+else
+    log "  ✓ logrotate config already exists"
+fi
+
 log "Vacuuming systemd journal..."
 if command -v journalctl >/dev/null 2>&1 && [[ -d /var/log/journal ]]; then
     if journalctl --vacuum-size=20M 2>/dev/null; then

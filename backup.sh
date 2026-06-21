@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.1.0"
+SCRIPT_VERSION="3.2.0"
 GITHUB_RAW_URL="https://raw.githubusercontent.com/solarexpertscr/influxdb-backup-gcs/main/backup.sh"
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -130,6 +130,26 @@ case "${1:-}" in
             log "Up to date: $SCRIPT_VERSION"
             exit 0
         fi
+        ;;
+    --status-only)
+        mkdir -p "${LOCAL_BACKUP_DIR}"
+        AVAILABLE_SPACE=$(df -m "${LOCAL_BACKUP_DIR}" | awk 'NR==2 {print $4}')
+        STATUS_FILE="${LOCAL_BACKUP_DIR}/status.json"
+        cat > "$STATUS_FILE" <<STATUSEOF
+{
+  "hostname": "$(hostname -s 2>/dev/null || echo unknown)",
+  "site": "${SITE_NAME}",
+  "version": "${SCRIPT_VERSION}",
+  "last_backup": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "free_mb": ${AVAILABLE_SPACE}
+}
+STATUSEOF
+        if rclone copy "$STATUS_FILE" "${RCLONE_DEST}status.json" 2>/dev/null; then
+            log "✓ Status uploaded (hourly, ${AVAILABLE_SPACE}MB free)"
+        else
+            log "⚠ Status upload failed"
+        fi
+        exit 0
         ;;
 esac
 
