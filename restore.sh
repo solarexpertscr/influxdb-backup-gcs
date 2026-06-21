@@ -2,166 +2,177 @@
 
 set -euo pipefail
 
-# ============================================================================
-# Restore InfluxDB from GCS shard backup
-# ============================================================================
-# Pulls all shard files from GCS back into a local backup directory, then
-# runs influxd restore. Frozen shards are pulled once; only the active shard
-# (and any shards from the most recent backup window) need downloading.
-#
-# Usage:
-#   bash restore.sh                    # restore to default target
-#   bash restore.sh --dry-run          # show what would be restored, don't run influxd restore
-#   bash restore.sh --restore-dir DIR  # pull shards to DIR, then restore
-#   bash restore.sh --list             # list available backup snapshots on GCS
-# ============================================================================
+SCRIPT_VERSION="3.0.2"
+GITHUB_RAW_URL="https://raw.githubusercontent.com/solarexpertscr/influxdb-backup-gcs/main/restore.sh"
 
-# Set PATH explicitly for cron/sudo compatibility
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-# Rclone config path (setup.sh writes to /etc/rclone.conf)
 export RCLONE_CONFIG="/etc/rclone.conf"
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"; }
-log_error() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: $1" >&2; }
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
 
 if [ ! -f "$ENV_FILE" ]; then
-    log_error "Environment file not found: $ENV_FILE"
+    echo "[$(date)] ERROR: Environment file not found: $ENV_FILE"
     exit 1
 fi
-
-set -a
-# shellcheck disable=SC1090
 source "$ENV_FILE"
-set +a
 
-# ---------------------------------------------------------------------------
-# Configuration resolution
-# ---------------------------------------------------------------------------
+# Derived values
+GCS_BUCKET="gs://${SITE_NAME}"
+RCLONE_DEST="${RCLONE_REMOTE}:${SITE_NAME}/influxdb/"
+TIMESTAMP=$(date +%Y%m%d%H%M%S)
+RESTORE_PATH="${LOCAL_BACKUP_DIR}/restore_${TIMESTAMP}"
 
-# RCLONE_REMOTE: prefer RCLONE_REMOTE_NAME, fallback to RCLONE_REMOTE, default "gcs"
-if [[ -n "${RCLONE_REMOTE_NAME:-}" ]]; then
-    RCLONE_REMOTE="${RCLONE_REMOTE_NAME}"
-elif [[ -z "${RCLONE_REMOTE:-}" ]]; then
-    RCLONE_REMOTE="gcs"
-fi
-[[ "$RCLONE_REMOTE" != *: ]] && RCLONE_REMOTE="${RCLONE_REMOTE}:"
+LOG_FILE="/var/log/influxdb-backup.log"
 
-LOCAL_BACKUP_DIR="${LOCAL_BACKUP_DIR:-/tmp/influxdb-backup-${SITE_NAME}}"
-RESTORE_DIR="${LOCAL_BACKUP_DIR}/restore-$(date +%Y%m%d_%H%M%S)"
-GCS_BACKUP_ROOT="${RCLONE_REMOTE}${SITE_NAME}/influxdb/"
+log() {
+    echo "[$(date)] $1"
+}
 
-DRY_RUN=false
-CUSTOM_RESTORE_DIR=""
-LIST_ONLY=false
+###############################################################################
+# Self-update
+###############################################################################
 
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --dry-run)
-            DRY_RUN=true
-            shift
-            ;;
-        --restore-dir)
-            CUSTOM_RESTORE_DIR="$2"
-            shift 2
-            ;;
-        --list)
-            LIST_ONLY=true
-            shift
-            ;;
-        -h|--help)
-            sed -n '2,12p' "${BASH_SOURCE[0]}"
-            exit 0
-            ;;
-        *)
-            log_error "Unknown option: $1"
+check_for_update() {
+    local temp_script
+    temp_script=$(mktemp)
+    if curl -fsSL "$GITHUB_RAW_URL" -o "$temp_script" 2>/dev/null; then
+        local remote_version
+        remote_version=$(grep '^SCRIPT_VERSION=' "$temp_script" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+        rm -f "$temp_script"
+        echo "$remote_version"
+        return 0
+    fi
+    rm -f "$temp_script"
+    return 1
+}
+
+do_update() {
+    local temp_script
+    temp_script=$(mktemp)
+
+    log "Checking for updates..."
+
+    if ! curl -fsSL "$GITHUB_RAW_URL" -o "$temp_script"; then
+        log "ERROR: Failed to download latest version"
+        rm -f "$temp_script"
+        return 1
+    fi
+
+    local remote_version
+    remote_version=$(grep '^SCRIPT_VERSION=' "$temp_script" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+
+    if [[ -z "$remote_version" ]]; then
+        log "ERROR: Downloaded script has no version tag"
+        rm -f "$temp_script"
+        return 1
+    fi
+
+    if [[ "$remote_version" == "$SCRIPT_VERSION" ]]; then
+        log "Already at latest version: $SCRIPT_VERSION"
+        rm -f "$temp_script"
+        return 0
+    fi
+
+    log "New version available: $remote_version (current: $SCRIPT_VERSION)"
+
+    if ! bash -n "$temp_script"; then
+        log "ERROR: Downloaded script has syntax errors - aborting update"
+        rm -f "$temp_script"
+        return 1
+    fi
+    log "Syntax check passed"
+
+    local backup_file="${SCRIPT_DIR}/restore.sh.bak.$(date +%Y%m%d_%H%M%S)"
+    cp "${SCRIPT_DIR}/restore.sh" "$backup_file"
+    log "Created backup: $(basename "$backup_file")"
+
+    if ! cp "$temp_script" "${SCRIPT_DIR}/restore.sh"; then
+        log "ERROR: Failed to install new version - attempting rollback"
+        cp "$backup_file" "${SCRIPT_DIR}/restore.sh" 2>/dev/null || log "ERROR: Rollback failed!"
+        rm -f "$temp_script"
+        return 1
+    fi
+
+    chmod +x "${SCRIPT_DIR}/restore.sh"
+    rm -f "$temp_script"
+
+    log "✓ Updated to version $remote_version"
+    log "Previous version saved as: $(basename "$backup_file")"
+    return 0
+}
+
+case "${1:-}" in
+    --update)
+        do_update
+        exit $?
+        ;;
+    --auto-update)
+        log "Running auto-update (non-interactive)..."
+        if do_update; then
+            log "✓ Auto-update complete"
+        else
+            log "Auto-update failed or skipped"
+        fi
+        exit 0
+        ;;
+    --check-update)
+        REMOTE_VER=$(check_for_update 2>/dev/null || echo "")
+        if [[ -n "$REMOTE_VER" && "$REMOTE_VER" != "$SCRIPT_VERSION" ]]; then
+            log "New version available: $REMOTE_VER (current: $SCRIPT_VERSION)"
+            log "Run: $0 --update to install"
             exit 1
-            ;;
-    esac
-done
+        else
+            log "Up to date: $SCRIPT_VERSION"
+            exit 0
+        fi
+        ;;
+esac
 
-[[ -n "$CUSTOM_RESTORE_DIR" ]] && RESTORE_DIR="$CUSTOM_RESTORE_DIR"
-
-# ---------------------------------------------------------------------------
-# --list: show what's on GCS
-# ---------------------------------------------------------------------------
-
-if $LIST_ONLY; then
-    log "Backup contents on ${GCS_BACKUP_ROOT}:"
-    rclone lsf "$GCS_BACKUP_ROOT" --files-only | sort
-    exit 0
-fi
-
-# ---------------------------------------------------------------------------
-# Pull shards from GCS
-# ---------------------------------------------------------------------------
+###############################################################################
+# Download all shards from GCS
+###############################################################################
 
 log "=========================================="
-log "InfluxDB Restore from GCS"
+log "InfluxDB Shard-Based Restore v${SCRIPT_VERSION}"
 log "Site: ${SITE_NAME}"
-log "Restore dir: ${RESTORE_DIR}"
 log "=========================================="
 
-mkdir -p "$RESTORE_DIR"
+mkdir -p "${RESTORE_PATH}"
 
-log "Pulling backed-up shards from GCS..."
-if rclone copy "$GCS_BACKUP_ROOT" "$RESTORE_DIR" --transfers=4; then
-    log "✓ Shard files synchronized"
-else
-    log_error "Failed to pull from GCS"
-    rm -rf "$RESTORE_DIR"
+log "Downloading all shards from ${RCLONE_DEST}..."
+
+if ! rclone sync "${RCLONE_DEST}" "${RESTORE_PATH}" --transfers=4; then
+    log "ERROR: Failed to download from GCS"
+    rm -rf "${RESTORE_PATH}"
     exit 1
 fi
 
-# Count what we pulled
-SHARD_COUNT=$(find "$RESTORE_DIR" -type f ! -name "manifest" | wc -l)
-TOTAL_SIZE=$(du -sm "$RESTORE_DIR" 2>/dev/null | awk '{print $1}')
-log "Shard files available: ${SHARD_COUNT}  |  Size: ${TOTAL_SIZE}MB"
+SHARD_COUNT=$(find "${RESTORE_PATH}" -type f ! -name "manifest" | wc -l)
+log "Downloaded ${SHARD_COUNT} shard files"
 
-# ---------------------------------------------------------------------------
-# Dry-run mode
-# ---------------------------------------------------------------------------
+###############################################################################
+# Restore to InfluxDB
+###############################################################################
 
-if $DRY_RUN; then
-    log "[DRY RUN] Would restore from: $RESTORE_DIR"
-    log "[DRY RUN] File list:"
-    find "$RESTORE_DIR" -type f | sort | sed 's/^/  /'
-    log "[DRY RUN] Restore directory preserved at: $RESTORE_DIR"
-    log "[DRY RUN] To actually restore, run: influxd restore -portable $RESTORE_DIR"
-    exit 0
-fi
+log "Restoring to InfluxDB..."
 
-# ---------------------------------------------------------------------------
-# Run influxd restore
-# ---------------------------------------------------------------------------
-
-log "Running influxd restore (portable)..."
-log "Target InfluxDB instance (default): $(influxd config show 2>/dev/null | grep -i 'http-bind' || echo 'localhost:8086')"
-
-if influxd restore -portable "$RESTORE_DIR" >> /var/log/influxdb-backup.log 2>&1; then
-    log "✓ Restore completed successfully"
-else
-    log_error "influxd restore failed — see /var/log/influxdb-backup.log"
-    log_error "Restore directory preserved at: $RESTORE_DIR"
+if ! influxd restore -portable "${RESTORE_PATH}" >> "$LOG_FILE" 2>&1; then
+    log "ERROR: InfluxDB restore failed"
+    log "Restored data preserved at: ${RESTORE_PATH}"
     exit 1
 fi
 
-# ---------------------------------------------------------------------------
+log "✓ InfluxDB restore completed successfully"
+
+###############################################################################
 # Cleanup
-# ---------------------------------------------------------------------------
+###############################################################################
 
-if [[ -z "$CUSTOM_RESTORE_DIR" ]]; then
-    rm -rf "$RESTORE_DIR"
-    log "✓ Temporary restore directory removed"
-else
-    log "Custom restore directory preserved at: $RESTORE_DIR"
-fi
+rm -rf "${RESTORE_PATH}"
+log "✓ Temporary restore directory removed"
 
 log "=========================================="
 log "✓ Restore completed successfully"
 log "=========================================="
-
 exit 0
