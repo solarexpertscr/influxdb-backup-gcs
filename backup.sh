@@ -176,7 +176,7 @@ if [[ "$RCLONE_REMOTE" != *: ]]; then
 fi
 
 # Set defaults
-LOCAL_BACKUP_DIR="${LOCAL_BACKUP_DIR:-/tmp/influxdb-backup-${SITE_NAME}}"
+LOCAL_BACKUP_DIR="${LOCAL_BACKUP_DIR:-/var/lib/influxdb-backup/${SITE_NAME}}"
 REQUIRED_MB="${REQUIRED_MB:-1000}"
 
 # GCS destination: each shard file is uploaded individually so rclone can

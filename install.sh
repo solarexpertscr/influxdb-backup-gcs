@@ -102,7 +102,7 @@ SITE_NAME="${SITE_NAME}"
 RCLONE_REMOTE_NAME="gcs"
 
 # Local temp directory for backup staging
-LOCAL_BACKUP_DIR="/tmp/influxdb-backup-${SITE_NAME}"
+LOCAL_BACKUP_DIR="/var/lib/influxdb-backup/${SITE_NAME}"
 
 # Minimum free disk space (MB) required before running backup
 REQUIRED_MB=1000
@@ -116,7 +116,7 @@ EOF
 
     log "✓ .env created"
     log "  SITE_NAME:              ${SITE_NAME}"
-    log "  LOCAL_BACKUP_DIR:       /tmp/influxdb-backup-${SITE_NAME}"
+    log "  LOCAL_BACKUP_DIR:       /var/lib/influxdb-backup/${SITE_NAME}"
     log "  GOOGLE_APPLICATION_CREDENTIALS: /etc/solar-assistant/gcs-key.json"
 else
     log ".env file found - preserving existing configuration"
