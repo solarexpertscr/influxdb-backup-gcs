@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.0.2"
+SCRIPT_VERSION="3.0.3"
 GITHUB_RAW_URL="https://raw.githubusercontent.com/solarexpertscr/influxdb-backup-gcs/main/backup.sh"
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -19,7 +19,8 @@ source "$ENV_FILE"
 
 # Derived values
 GCS_BUCKET="gs://${SITE_NAME}"
-RCLONE_DEST="${RCLONE_REMOTE}:${SITE_NAME}/influxdb/"
+RCLONE_REMOTE_NAME="${RCLONE_REMOTE_NAME:-gcs}"
+RCLONE_DEST="${RCLONE_REMOTE_NAME}:${SITE_NAME}/influxdb/"
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
 LOCAL_BACKUP_PATH="${LOCAL_BACKUP_DIR}/${TIMESTAMP}"
 
