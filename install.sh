@@ -130,6 +130,21 @@ fi
 chmod 600 "$ENV_FILE"
 
 # ---------------------------------------------------------------------------
+# Install Tailscale (if not already present)
+# ---------------------------------------------------------------------------
+
+if ! command -v tailscale &> /dev/null; then
+    log "Installing Tailscale..."
+    if sudo curl -fsSL https://tailscale.com/install.sh | sudo sh; then
+        log "✓ Tailscale installed"
+    else
+        warn "Tailscale installation failed - install manually later if needed"
+    fi
+else
+    log "Tailscale already installed: $(tailscale version | head -1)"
+fi
+
+# ---------------------------------------------------------------------------
 # Run setup.sh (rclone config, bucket creation, lifecycle, cron)
 # ---------------------------------------------------------------------------
 
