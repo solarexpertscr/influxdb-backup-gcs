@@ -143,6 +143,19 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Test backup
+# ---------------------------------------------------------------------------
+
+log ""
+log "Running initial backup test..."
+if bash "${INSTALL_DIR}/backup.sh"; then
+    log "✓ Initial backup test successful"
+else
+    warn "Initial backup test failed - check /var/log/influxdb-backup.log"
+    warn "Run manually: bash ${INSTALL_DIR}/backup.sh"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
@@ -157,9 +170,6 @@ log " Restore:      ${INSTALL_DIR}/restore.sh"
 log " Schedule:     Daily at 2:00 AM"
 log " Auto-update:  Sunday 3:00 AM"
 log " Logs:         /var/log/influxdb-backup.log"
-log ""
-log " Test now:"
-log "   sudo bash ${INSTALL_DIR}/backup.sh"
 log "========================================="
 
 exit 0
