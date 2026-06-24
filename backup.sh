@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.2.0"
+SCRIPT_VERSION="3.2.1"
 GITHUB_RAW_URL="https://raw.githubusercontent.com/solarexpertscr/influxdb-backup-gcs/main/backup.sh"
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

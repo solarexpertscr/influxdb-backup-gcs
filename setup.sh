@@ -136,8 +136,8 @@ AUTOUPDATE_CMD="${SCRIPT_DIR}/backup.sh --auto-update >> /var/log/influxdb-backu
 CLEANUP_CMD="${SCRIPT_DIR}/cleanup.sh >> /var/log/influxdb-backup.log 2>&1"
 STATUS_CMD="${SCRIPT_DIR}/backup.sh --status-only >> /var/log/influxdb-backup.log 2>&1"
 
-# Remove any existing entries for this script
-(crontab -l 2>/dev/null | grep -v "${SCRIPT_DIR}/backup.sh" | grep -v "${SCRIPT_DIR}/cleanup.sh") | crontab -
+# Remove any existing entries for this script (safe when no crontab exists)
+(crontab -l 2>/dev/null | grep -v "${SCRIPT_DIR}/backup.sh" | grep -v "${SCRIPT_DIR}/cleanup.sh" || true) | crontab -
 
 # Add new entries
 crontab_line() {
