@@ -180,7 +180,11 @@ fi
 # ---------------------------------------------------------------------------
 
 log "Verifying cron jobs..."
-CRON_ENTRIES=$(crontab -l 2>/dev/null | grep -c "${INSTALL_DIR}" || echo "0")
+CRON_CONTENT=$(crontab -l 2>/dev/null || echo "")
+CRON_ENTRIES=0
+if [[ -n "$CRON_CONTENT" ]]; then
+    CRON_ENTRIES=$(echo "$CRON_CONTENT" | grep -c "${INSTALL_DIR}" || true)
+fi
 if [[ "${CRON_ENTRIES}" -ge 4 ]]; then
     log "✓ Cron jobs installed (${CRON_ENTRIES} entries)"
 else
