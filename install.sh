@@ -176,6 +176,19 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Verify cron jobs are installed
+# ---------------------------------------------------------------------------
+
+log "Verifying cron jobs..."
+CRON_ENTRIES=$(crontab -l 2>/dev/null | grep -c "${INSTALL_DIR}" || echo "0")
+if [[ "${CRON_ENTRIES}" -ge 4 ]]; then
+    log "✓ Cron jobs installed (${CRON_ENTRIES} entries)"
+else
+    warn "⚠ Cron jobs missing or incomplete (found ${CRON_ENTRIES}, expected 4)"
+    warn "Re-run setup: sudo bash ${INSTALL_DIR}/setup.sh"
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 
