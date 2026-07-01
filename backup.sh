@@ -2,7 +2,7 @@
 
 set -euo pipefail
 
-SCRIPT_VERSION="3.2.2"
+SCRIPT_VERSION="3.3.0"
 GITHUB_RAW_URL="https://raw.githubusercontent.com/solarexpertscr/influxdb-backup-gcs/main/backup.sh"
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -223,40 +223,84 @@ BACKUP_SIZE=$(du -sm "$LOCAL_BACKUP_PATH" 2>/dev/null | awk '{print $1}')
 log "Shard files: ${SHARD_COUNT}  |  Local size: ${BACKUP_SIZE}MB"
 
 ###############################################################################
-# Sync shards to GCS
+# Sync ONLY the 2 most recent shards + manifest to GCS
+# Older shards are frozen and already on GCS — no need to re-upload.
 ###############################################################################
 
-log "Syncing shards to GCS: ${RCLONE_DEST}"
+log "Identifying shards to upload (2 newest by mtime)..."
+
+# Collect all shard files (exclude manifest), sorted newest first
+mapfile -t ALL_SHARDS < <(find "$LOCAL_BACKUP_PATH" -type f ! -name "manifest" -printf '%T@ %p\n' | sort -rn | awk '{print $2}')
+UPLOAD_COUNT=${#ALL_SHARDS[@]}
+
+# Pick the 2 newest
+TO_UPLOAD=()
+for (( i=0; i<UPLOAD_COUNT && i<2; i++ )); do
+    TO_UPLOAD+=("${ALL_SHARDS[$i]}")
+done
+
+# Include manifest if it exists
+MANIFEST_FILE="${LOCAL_BACKUP_PATH}/manifest"
+UPLOAD_MANIFEST=false
+if [[ -f "$MANIFEST_FILE" ]]; then
+    UPLOAD_MANIFEST=true
+fi
+
+UPLOAD_TOTAL=$(( ${#TO_UPLOAD[@]} + ($UPLOAD_MANIFEST && 1 || 0) ))
+log "Shards to upload: ${#TO_UPLOAD[@]} of ${SHARD_COUNT} total (+ manifest: ${UPLOAD_MANIFEST})"
+for f in "${TO_UPLOAD[@]}"; do
+    log "  → $(basename "$f")  ($(du -sh "$f" | awk '{print $1}'))"
+done
 
 UPLOAD_START=$(date +%s)
 
-if ! rclone copy "$LOCAL_BACKUP_PATH" "${RCLONE_DEST}" --update --transfers=4 >> "$LOG_FILE" 2>&1; then
+SYNC_TMPDIR=$(mktemp -d)
+# Copy only the selected files into a staging dir
+for f in "${TO_UPLOAD[@]}"; do
+    cp "$f" "${SYNC_TMPDIR}/"
+done
+if $UPLOAD_MANIFEST; then
+    cp "$MANIFEST_FILE" "${SYNC_TMPDIR}/"
+fi
+
+if ! rclone copy "$SYNC_TMPDIR" "${RCLONE_DEST}" --update --transfers=4 >> "$LOG_FILE" 2>&1; then
     log "ERROR: Shard sync to GCS failed"
+    rm -rf "$SYNC_TMPDIR"
     log "Local backup preserved at: $LOCAL_BACKUP_PATH"
     exit 1
 fi
+rm -rf "$SYNC_TMPDIR"
 
 UPLOAD_END=$(date +%s)
-log "✓ Shard sync completed in $(( UPLOAD_END - UPLOAD_START ))s"
+log "✓ Shard sync completed in $(( UPLOAD_END - UPLOAD_START ))s (${#TO_UPLOAD[@]} shards + manifest)"
 
 ###############################################################################
-# Verify upload
+# Verify upload (only the files we uploaded)
 ###############################################################################
 
-log "Verifying sync..."
+log "Verifying uploaded files..."
 
 VERIFIED=0
-for f in $(find "$LOCAL_BACKUP_PATH" -type f ! -name "manifest"); do
+for f in "${TO_UPLOAD[@]}"; do
     REL_PATH="${f#${LOCAL_BACKUP_PATH}/}"
     if rclone size "${RCLONE_DEST}${REL_PATH}" > /dev/null 2>&1; then
         VERIFIED=$(( VERIFIED + 1 ))
+    else
+        log "⚠ Verification failed for: $REL_PATH"
     fi
 done
+if $UPLOAD_MANIFEST; then
+    if rclone size "${RCLONE_DEST}manifest" > /dev/null 2>&1; then
+        VERIFIED=$(( VERIFIED + 1 ))
+    else
+        log "⚠ Verification failed for: manifest"
+    fi
+fi
 
-if [[ "$VERIFIED" -eq "$SHARD_COUNT" ]]; then
-    log "✓ All ${SHARD_COUNT} shard files verified on GCS"
+if [[ "$VERIFIED" -eq "$UPLOAD_TOTAL" ]]; then
+    log "✓ All ${UPLOAD_TOTAL} uploaded files verified on GCS"
 else
-    log "ERROR: Verification mismatch: ${VERIFIED}/${SHARD_COUNT} shard files confirmed"
+    log "ERROR: Verification mismatch: ${VERIFIED}/${UPLOAD_TOTAL} files confirmed"
     log "Local backup preserved at: $LOCAL_BACKUP_PATH"
     exit 1
 fi
