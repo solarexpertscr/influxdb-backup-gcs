@@ -1,9 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-SCRIPT_VERSION="4.0.0"
-GITHUB_RAW_URL="https://raw.githubusercontent.com/solarexpertscr/workspace/main/influxdb-backup-gcs/backup.sh"
-GITHUB_PAT_FILE="${SCRIPT_DIR}/.github-pat"
+SCRIPT_VERSION="4.1.1"
+GITHUB_REPO="solarexpertscr/solar-assistant-scripts"
 
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export RCLONE_CONFIG="/etc/rclone.conf"
@@ -17,24 +16,14 @@ if [ ! -f "$ENV_FILE" ]; then
 fi
 source "$ENV_FILE"
 
-# Load GitHub PAT for authenticated requests to the private workspace repo.
-# The PAT is downloaded by install.sh from GCS and stored in .github-pat
-# (chmod 600). It is a fine-grained PAT with read-only access to the
-# solarexpertscr/workspace repo. The PAT is never hardcoded in the script.
-GITHUB_PAT=""
-if [ -f "$GITHUB_PAT_FILE" ]; then
-    GITHUB_PAT=$(cat "$GITHUB_PAT_FILE" 2>/dev/null)
-fi
+DEPLOY_KEY_FILE="${SCRIPT_DIR}/deploy_key"
 
-GCS_BUCKET="gs://${SITE_NAME}"
 RCLONE_REMOTE_NAME="${RCLONE_REMOTE_NAME:-gcs}"
 RCLONE_DEST="${RCLONE_REMOTE_NAME}:${SITE_NAME}/influxdb/"
 TIMESTAMP=$(date +%Y%m%d%H%M%S)
 LOCAL_BACKUP_PATH="${LOCAL_BACKUP_DIR}/${TIMESTAMP}"
 
-# Lock file prevents concurrent historical uploads
 LOCK_FILE="/var/lock/influxdb-backup-historical.lock"
-# Marker file: persists the "first run complete" state
 FIRST_RUN_MARKER="${LOCAL_BACKUP_DIR}/.first_run_complete"
 
 LOG_FILE="/var/log/influxdb-backup.log"
@@ -45,28 +34,64 @@ fi
 log() { echo "[$(date)] $1" | tee -a "$LOG_FILE"; }
 
 check_for_update() {
-    local temp_script; temp_script=$(mktemp)
-    if curl -fsSL -H "Authorization: token ${GITHUB_PAT}" "$GITHUB_RAW_URL" -o "$temp_script" 2>/dev/null; then
-        local remote_version; remote_version=$(grep '^SCRIPT_VERSION=' "$temp_script" | head -1 | sed 's/.*"\(.*\)".*/\1/')
-        rm -f "$temp_script"; echo "$remote_version"; return 0
-    fi; rm -f "$temp_script"; return 1
+    local temp_dir; temp_dir=$(mktemp -d)
+    if git ls-remote "git@github.com:${GITHUB_REPO}.git" refs/heads/main >/dev/null 2>&1 && \
+       git clone --depth 1 "git@github.com:${GITHUB_REPO}.git" "$temp_dir" >/dev/null 2>&1; then
+        local remote_version; remote_version=$(grep '^SCRIPT_VERSION=' "$temp_dir/backup.sh" | head -1 | sed 's/SCRIPT_VERSION=\(.*\)/\1/' | sed 's/"//g')
+        rm -rf "$temp_dir"
+        echo "$remote_version"
+        return 0
+    fi
+    rm -rf "$temp_dir"
+    return 1
 }
 
 do_update() {
-    local temp_script; temp_script=$(mktemp); log "Checking for updates..."
-    if ! curl -fsSL -H "Authorization: token ${GITHUB_PAT}" "$GITHUB_RAW_URL" -o "$temp_script"; then log "ERROR: Failed to download"; rm -f "$temp_script"; return 1; fi
-    local remote_version; remote_version=$(grep '^SCRIPT_VERSION=' "$temp_script" | head -1 | sed 's/.*"\(.*\)".*/\1/')
-    if [[ -z "$remote_version" ]]; then log "ERROR: No version tag"; rm -f "$temp_script"; return 1; fi
-    if [[ "$remote_version" == "$SCRIPT_VERSION" ]]; then log "Up to date: $SCRIPT_VERSION"; rm -f "$temp_script"; return 0; fi
-    log "New version: $remote_version (current: $SCRIPT_VERSION)"
-    if ! bash -n "$temp_script"; then log "ERROR: Syntax errors"; rm -f "$temp_script"; return 1; fi
+    local temp_dir; temp_dir=$(mktemp -d)
+    log "Checking for updates via SSH deploy key..."
+    if ! git clone --depth 1 "git@github.com:${GITHUB_REPO}.git" "$temp_dir" >/dev/null 2>&1; then
+        log "ERROR: Failed to clone repository via SSH"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+
+    local remote_version; remote_version=$(grep '^SCRIPT_VERSION=' "$temp_dir/backup.sh" | head -1 | sed 's/SCRIPT_VERSION=\(.*\)/\1/' | sed 's/"//g')
+    if [[ -z "$remote_version" ]]; then
+        log "ERROR: No version tag found in remote backup.sh"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+
+    if [[ "$remote_version" == "$SCRIPT_VERSION" ]]; then
+        log "Up to date: $SCRIPT_VERSION"
+        rm -rf "$temp_dir"
+        return 0
+    fi
+
+    log "New version available: $remote_version (current: $SCRIPT_VERSION)"
+
+    if ! bash -n "$temp_dir/backup.sh"; then
+        log "ERROR: Remote backup.sh has syntax errors"
+        rm -rf "$temp_dir"
+        return 1
+    fi
+
     local backup_file="${SCRIPT_DIR}/backup.sh.bak.$(date +%Y%m%d_%H%M%S)"
-    cp "${SCRIPT_DIR}/backup.sh" "$backup_file"; log "Backup: $(basename "$backup_file")"
-    if ! cp "$temp_script" "${SCRIPT_DIR}/backup.sh"; then log "ERROR: Failed install"; cp "$backup_file" "${SCRIPT_DIR}/backup.sh" 2>/dev/null || true; return 1; fi
-    chmod +x "${SCRIPT_DIR}/backup.sh"; rm -f "$temp_script"; log "✓ Updated to $remote_version"
+    cp "${SCRIPT_DIR}/backup.sh" "$backup_file"
+    log "Backup: $(basename "$backup_file")"
+
+    if ! cp "$temp_dir/backup.sh" "${SCRIPT_DIR}/backup.sh"; then
+        log "ERROR: Failed to install update"
+        cp "$backup_file" "${SCRIPT_DIR}/backup.sh" 2>/dev/null || true
+        rm -rf "$temp_dir"
+        return 1
+    fi
+
+    chmod +x "${SCRIPT_DIR}/backup.sh"
+    rm -rf "$temp_dir"
+    log "✓ Updated to $remote_version"
 }
 
-# Count shard tar.gz files in GCS (s*.tar.gz format, NOT old date-prefixed ones)
 count_gcs_shards() {
     local shard_count
     shard_count=$(rclone lsjson "${RCLONE_DEST}" --files-only --max-depth 1 2>/dev/null | \
@@ -74,28 +99,22 @@ count_gcs_shards() {
 import json,sys
 data=json.load(sys.stdin)
 names=[f['Name'] for f in data]
-# New format: s1.tar.gz, s2.tar.gz, ... s103.tar.gz (no 'T', no date prefix)
-count = sum(1 for n in names if n.startswith('s') and n.endswith('.tar.gz') and 'T' not in n and n[1:-7].isdigit())
+count = sum(1 for n in names if n.isdigit() and len(n) == 5)
 print(count)
 " 2>/dev/null || echo "0")
     echo "$shard_count"
 }
 
-# Count local shard tar.gz files in most recent backup dir
 count_local_shards() {
     local latest_backup
-    latest_backup=$(find "${LOCAL_BACKUP_DIR}" -maxdepth 1 -type d -name "[0-9]*" | sort -r | head -1)
+    latest_backup=$(find "${LOCAL_BACKUP_DIR}" -maxdepth 1 -type d -name "[0-9]*" 2>/dev/null | sort -r | head -1)
     if [[ -z "$latest_backup" ]]; then
         echo "0"
         return
     fi
-    find "$latest_backup" -type f -name "s*.tar.gz" | wc -l
+    find "$latest_backup" -type f ! -name "manifest" 2>/dev/null | wc -l
 }
 
-# Cleanup old-format files from GCS
-# Old format: 20260701T020003Z.s1.tar.gz (has 'T' in name from old script)
-# New format: s1.tar.gz (no date prefix, no 'T')
-# Also cleans up bare numeric shard files (00001, 00002, etc.) from even older format
 cleanup_old_gcs_format() {
     log "Checking for old-format GCS files to clean up..."
     local old_files
@@ -106,21 +125,17 @@ data=json.load(sys.stdin)
 names=[f['Name'] for f in data]
 old = []
 for n in names:
-    # Old dated tar.gz format (e.g. 20260701T020003Z.s1.tar.gz)
-    if n.endswith('.tar.gz') and 'T' in n:
+    # Date-prefixed manifest/meta files (old tarball format)
+    if n.endswith('.manifest') or n.endswith('.meta') and 'T' in n:
         old.append(n)
-    # Ancient bare numeric shard format (00001, 00002, etc.)
-    elif n.isdigit() and len(n) == 5:
-        old.append(n)
-    # Old bare manifest
-    elif n == 'manifest':
+    # Any .tar.gz files
+    elif n.endswith('.tar.gz'):
         old.append(n)
 print(' '.join(old))
 " 2>/dev/null || echo "")
 
     if [[ -n "$old_files" ]]; then
-        local count
-        count=$(echo "$old_files" | wc -w)
+        local count; count=$(echo "$old_files" | wc -w)
         log "Found $count old-format files, deleting..."
         echo "$old_files" | tr ' ' '\n' | while IFS= read -r f; do
             [[ -n "$f" ]] && rclone deletefile "${RCLONE_DEST}${f}" 2>/dev/null && log "  Deleted: $f"
@@ -131,12 +146,9 @@ print(' '.join(old))
     fi
 }
 
-# Run first-run / recovery: upload all shard archives from latest local backup
 run_historical_upload() {
-    # Lock check
     if [[ -f "$LOCK_FILE" ]]; then
-        local lock_age
-        lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0) ))
+        local lock_age; lock_age=$(( $(date +%s) - $(stat -c %Y "$LOCK_FILE" 2>/dev/null || echo 0) ))
         if (( lock_age < 3600 )); then
             log "Historical upload already in progress (lock age: ${lock_age}s), skipping"
             return 1
@@ -146,7 +158,6 @@ run_historical_upload() {
         fi
     fi
 
-    # Acquire lock
     trap "rm -f '$LOCK_FILE'" EXIT
     echo "$$ $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$LOCK_FILE"
 
@@ -154,9 +165,7 @@ run_historical_upload() {
     log "HISTORICAL UPLOAD MODE"
     log "=========================================="
 
-    # Find most recent backup directory
-    local latest_backup
-    latest_backup=$(find "${LOCAL_BACKUP_DIR}" -maxdepth 1 -type d -name "[0-9]*" | sort -r | head -1)
+    local latest_backup; latest_backup=$(find "${LOCAL_BACKUP_DIR}" -maxdepth 1 -type d -name "[0-9]*" | sort -r | head -1)
 
     if [[ -z "$latest_backup" || ! -d "$latest_backup" ]]; then
         log "ERROR: No local backup directory found in ${LOCAL_BACKUP_DIR}"
@@ -164,55 +173,45 @@ run_historical_upload() {
         return 1
     fi
 
-    local total_shards
-    total_shards=$(find "$latest_backup" -type f -name "s*.tar.gz" | wc -l)
-    log "Local backup: $(basename "$latest_backup") with $total_shards shard archives"
+    local total_shards; total_shards=$(find "$latest_backup" -type f ! -name "manifest" | wc -l)
+    log "Local backup: $(basename "$latest_backup") with $total_shards shard files"
 
-    # Get list of shard archives already in GCS (egress check!)
-    local gcs_shard_names
-    gcs_shard_names=$(rclone lsjson "${RCLONE_DEST}" --files-only --max-depth 1 2>/dev/null | \
+    local gcs_shard_names; gcs_shard_names=$(rclone lsjson "${RCLONE_DEST}" --files-only --max-depth 1 2>/dev/null | \
         python3 -c "
 import json,sys
 data=json.load(sys.stdin)
-names = [f['Name'] for f in data if f['Name'].startswith('s') and f['Name'].endswith('.tar.gz') and 'T' not in f['Name']]
+names = [f['Name'] for f in data if f['Name'].isdigit() and len(f['Name']) == 5]
 print(' '.join(names))
 " 2>/dev/null || echo "")
 
-    # Build list of shard archives to upload (skip ones already in GCS)
-    local to_upload=()
-    local skipped=0
+    local to_upload=() skipped=0
     while IFS= read -r shard_file; do
-        local shard_name
-        shard_name=$(basename "$shard_file")
+        local shard_name; shard_name=$(basename "$shard_file")
         if echo " $gcs_shard_names " | grep -q " $shard_name "; then
             ((skipped++)) || true
         else
             to_upload+=("$shard_file")
         fi
-    done < <(find "$latest_backup" -type f -name "s*.tar.gz")
+    done < <(find "$latest_backup" -type f ! -name "manifest")
 
     log "Already in GCS: $skipped | Need to upload: ${#to_upload[@]}"
 
     if [[ ${#to_upload[@]} -eq 0 ]]; then
-        log "All shard archives already in GCS - no upload needed"
-        # Still cleanup old format
+        log "All shard files already in GCS - no upload needed"
         cleanup_old_gcs_format
         touch "$FIRST_RUN_MARKER"
         rm -f "$LOCK_FILE"
         return 0
     fi
 
-    # Upload only missing shard archives
-    log "Uploading ${#to_upload[@]} missing shard archives..."
-    local SYNC_TMPDIR
-    SYNC_TMPDIR=$(mktemp -d)
+    log "Uploading ${#to_upload[@]} missing shard files..."
+    local SYNC_TMPDIR; SYNC_TMPDIR=$(mktemp -d)
     for f in "${to_upload[@]}"; do
         cp "$f" "${SYNC_TMPDIR}/"
     done
 
-    local UPLOAD_START UPLOAD_END
-    UPLOAD_START=$(date +%s)
-    if ! rclone copy "$SYNC_TMPDIR" "${RCLONE_DEST}" --update --transfers=4 --no-check-dest >> "$LOG_FILE" 2>&1; then
+    local UPLOAD_START UPLOAD_END; UPLOAD_START=$(date +%s)
+    if ! rclone copy "$SYNC_TMPDIR" "${RCLONE_DEST}" --update --transfers=4 >> "$LOG_FILE" 2>&1; then
         log "ERROR: Historical sync failed"
         rm -rf "$SYNC_TMPDIR"
         rm -f "$LOCK_FILE"
@@ -222,10 +221,7 @@ print(' '.join(names))
     UPLOAD_END=$(date +%s)
     log "✓ Historical upload completed in $(( UPLOAD_END - UPLOAD_START ))s"
 
-    # Cleanup old-format files
     cleanup_old_gcs_format
-
-    # Mark first run complete
     touch "$FIRST_RUN_MARKER"
     log "✓ Historical upload finished, marker set"
 
@@ -276,15 +272,10 @@ if (( AVAILABLE_SPACE < REQUIRED_MB )); then
 fi
 log "✓ Disk OK: ${AVAILABLE_SPACE}MB"
 
-# ============================================================================
-# FIRST RUN DETECTION
-# If first_run marker doesn't exist OR GCS shard count < local shard count,
-# run historical upload before normal backup to ensure no data is lost
-# ============================================================================
 if [[ ! -f "$FIRST_RUN_MARKER" ]]; then
     LOCAL_SHARDS=$(count_local_shards)
     GCS_SHARDS=$(count_gcs_shards)
-    log "First run check: local=$LOCAL_SHARDS shard archives, gcs=$GCS_SHARDS shard archives"
+    log "First run check: local=$LOCAL_SHARDS shard files, gcs=$GCS_SHARDS shard files"
 
     if (( GCS_SHARDS < LOCAL_SHARDS )); then
         log "⚠ First run detected - GCS missing shards, running historical upload"
@@ -310,14 +301,13 @@ if ! influxd backup -portable "$LOCAL_BACKUP_PATH" >> "$LOG_FILE" 2>&1; then
 fi
 log "✓ Backup created successfully"
 
-# Count tar.gz shard archives (s*.tar.gz format)
-SHARD_COUNT=$(find "$LOCAL_BACKUP_PATH" -type f -name "s*.tar.gz" | wc -l)
+SHARD_COUNT=$(find "$LOCAL_BACKUP_PATH" -type f ! -name "manifest" | wc -l)
 BACKUP_SIZE=$(du -sm "$LOCAL_BACKUP_PATH" 2>/dev/null | awk '{print $1}')
-log "Shard archives: ${SHARD_COUNT}  |  Size: ${BACKUP_SIZE}MB"
+log "Shard files: ${SHARD_COUNT}  |  Size: ${BACKUP_SIZE}MB"
 
-log "Identifying archives to upload (2 newest)..."
+log "Identifying shards to upload (2 newest)..."
 
-mapfile -t ALL_SHARDS < <(find "$LOCAL_BACKUP_PATH" -type f -name "s*.tar.gz" -printf '%T@ %p\n' | sort -rn | awk '{print $2}')
+mapfile -t ALL_SHARDS < <(find "$LOCAL_BACKUP_PATH" -type f ! -name "manifest" -printf '%T@ %p\n' | sort -rn | awk '{print $2}')
 UPLOAD_COUNT=${#ALL_SHARDS[@]}
 
 TO_UPLOAD=()
@@ -325,15 +315,9 @@ for (( i=0; i<UPLOAD_COUNT && i<2; i++ )); do
     TO_UPLOAD+=("${ALL_SHARDS[$i]}")
 done
 
-UPLOAD_MANIFEST=false
+log "Uploading ${#TO_UPLOAD[@]} of ${SHARD_COUNT} shard files..."
 
-# Calculate upload total
-if $UPLOAD_MANIFEST; then
-    UPLOAD_TOTAL=$(( ${#TO_UPLOAD[@]} + 1 ))
-else
-    UPLOAD_TOTAL=${#TO_UPLOAD[@]}
-fi
-log "Archives to upload: ${#TO_UPLOAD[@]} of ${SHARD_COUNT} total"
+UPLOAD_TOTAL=${#TO_UPLOAD[@]}
 
 UPLOAD_START=$(date +%s)
 SYNC_TMPDIR=$(mktemp -d)
@@ -362,9 +346,7 @@ else
     log "ERROR: Verification mismatch ${VERIFIED}/${UPLOAD_TOTAL}"; exit 1
 fi
 
-# Cleanup old-format files from GCS after successful upload
 cleanup_old_gcs_format
-
 rm -rf "$LOCAL_BACKUP_PATH"
 log "✓ Cleaned up"
 
