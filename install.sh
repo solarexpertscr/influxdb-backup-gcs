@@ -78,17 +78,47 @@ elif [[ -f "$DEPLOY_KEY_FILE" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
+# GCS access (rclone may not be configured yet on fresh install)
+# ---------------------------------------------------------------------------
+
+# Set rclone config if available (created by setup.sh)
+if [[ -f "/etc/rclone.conf" ]]; then
+    export RCLONE_CONFIG="/etc/rclone.conf"
+fi
+
+# ---------------------------------------------------------------------------
 # Try to download deploy key from GCS (for migration)
+# Supports both flat path (correct) and nested path (some upload tools)
 # ---------------------------------------------------------------------------
 
 if [[ "$USE_PRIVATE_REPO" == false ]]; then
     log "Checking for deploy key in GCS: gs://${SITE_NAME}/deploy_key"
     if command -v rclone &> /dev/null; then
-        if rclone copyto "gcs:${SITE_NAME}/deploy_key" "${DEPLOY_KEY_FILE}" 2>/dev/null; then
-            chmod 600 "${DEPLOY_KEY_FILE}"
-            log "✓ Deploy key found in GCS, switching to private repo"
-            USE_PRIVATE_REPO=true
+        # Check if gcs remote exists
+        if rclone listremotes 2>/dev/null | grep -q "^gcs:"; then
+            # Try flat file path first (correct upload)
+            if rclone copyto "gcs:${SITE_NAME}/deploy_key" "${DEPLOY_KEY_FILE}" 2>/dev/null && \
+               [[ -f "${DEPLOY_KEY_FILE}" ]] && [[ -s "${DEPLOY_KEY_FILE}" ]]; then
+                chmod 600 "${DEPLOY_KEY_FILE}"
+                log "✓ Deploy key found in GCS (flat path), switching to private repo"
+                USE_PRIVATE_REPO=true
+            # Try nested path (incorrect upload from some tools)
+            elif rclone copy "gcs:${SITE_NAME}/deploy_key" /tmp/ 2>/dev/null && \
+                 [[ -f "/tmp/deploy_key/deploy_key" ]] && [[ -s "/tmp/deploy_key/deploy_key" ]]; then
+                mv "/tmp/deploy_key/deploy_key" "${DEPLOY_KEY_FILE}"
+                chmod 600 "${DEPLOY_KEY_FILE}"
+                rm -rf /tmp/deploy_key
+                log "✓ Deploy key found in GCS (nested path), switching to private repo"
+                USE_PRIVATE_REPO=true
+            else
+                log "⚠ No deploy key found in GCS (checked both flat and nested paths)"
+                log "  Will use PAT-based authentication to public repo"
+            fi
+        else
+            log "⚠ rclone remote 'gcs' not configured yet - will use PAT"
         fi
+    else
+        log "⚠ rclone not installed yet - will use PAT"
     fi
 fi
 
@@ -118,6 +148,8 @@ Host github.com
 EOF
         chmod 600 "$SSH_CONFIG_FILE"
         log "✓ SSH config updated for GitHub deploy key"
+    else
+        log "SSH config already has github.com entry - verifying..."
     fi
 
     # Mark private repo as active
@@ -174,7 +206,7 @@ download_via_git() {
 
         rm -rf "$TEMP_CLONE_DIR"
     else
-        log_error "Failed to clone ${repo_url}"
+        log_error "Failed to clone ${repo_url} - check SSH key setup"
     fi
 }
 
