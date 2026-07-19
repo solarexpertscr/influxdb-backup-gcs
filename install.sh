@@ -2,21 +2,10 @@
 
 set -euo pipefail
 
-# ============================================================================
-# Bootstrap Script — Deploy Key Setup for Solar Assistant Backup
-# ============================================================================
-# This script generates an SSH deploy key locally, displays the public key,
-# and validates that it's been added to GitHub before exiting.
-# 
-# The private repo (solarexpertscr/solar-assistant-scripts) handles all
-# actual backup installation and configuration.
-# ============================================================================
-
 INSTALL_DIR="/opt/influxdb-backup-gcs"
 GITHUB_PRIVATE_REPO="solarexpertscr/solar-assistant-scripts"
 DEPLOY_KEY_FILE="${INSTALL_DIR}/deploy_key"
 
-# Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -26,25 +15,15 @@ NC='\033[0m'
 log()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
-prompt() { echo -en "${CYAN}$1${NC} "; }
-
-# ---------------------------------------------------------------------------
-# Determine SITE_NAME
-# ---------------------------------------------------------------------------
 
 if [[ $# -gt 0 ]]; then
     SITE_NAME="$1"
-    # Strip "solar-assistant-" prefix if present to avoid duplication
     SITE_NAME="${SITE_NAME#solar-assistant-}"
     log "Using site name: solar-assistant-${SITE_NAME}"
 else
     log_error "No site name provided"
     log_error "Usage: bash install.sh <sitename>"
 fi
-
-# ---------------------------------------------------------------------------
-# Pre-checks
-# ---------------------------------------------------------------------------
 
 if ! command -v ssh-keygen &> /dev/null; then
     log_error "ssh-keygen is required but not installed"
@@ -53,23 +32,14 @@ fi
 if ! command -v git &> /dev/null; then
     log "git not found - installing..."
     if command -v apt-get &> /dev/null; then
-        sudo apt-get update -qq && sudo apt-get install -y -qq git
+        apt-get update -qq && apt-get install -y -qq git
         log "✓ git installed"
     else
-        log_error "git is required but not installed. Install git first, then re-run."
+        log_error "git is required but not installed"
     fi
 fi
 
-# ---------------------------------------------------------------------------
-# Create install directory
-# ---------------------------------------------------------------------------
-
-sudo mkdir -p "$INSTALL_DIR"
-sudo chown "$(id -u):$(id -g)" "$INSTALL_DIR" 2>/dev/null || true
-
-# ---------------------------------------------------------------------------
-# Main loop: generate key, validate, retry if needed
-# ---------------------------------------------------------------------------
+mkdir -p "$INSTALL_DIR"
 
 while true; do
     log ""
@@ -77,16 +47,9 @@ while true; do
     log "Step 1: Generating SSH deploy key"
     log "========================================="
     
-    # Remove existing key if present
-    if [[ -f "$DEPLOY_KEY_FILE" ]]; then
-        log "Removing existing deploy key..."
-        sudo rm -f "$DEPLOY_KEY_FILE" "${DEPLOY_KEY_FILE}.pub"
-    fi
-    
-    # Generate new key pair
-    sudo ssh-keygen -t ed25519 -f "$DEPLOY_KEY_FILE" -N "" -C "solar-assistant-${SITE_NAME}@deploy" >/dev/null 2>&1
-    sudo chmod 600 "$DEPLOY_KEY_FILE"
-    sudo chown root:root "$DEPLOY_KEY_FILE" "${DEPLOY_KEY_FILE}.pub"
+    rm -f "$DEPLOY_KEY_FILE" "${DEPLOY_KEY_FILE}.pub"
+    ssh-keygen -t ed25519 -f "$DEPLOY_KEY_FILE" -N "" -C "solar-assistant-${SITE_NAME}@deploy" >/dev/null 2>&1
+    chmod 600 "$DEPLOY_KEY_FILE"
     
     log "✓ Deploy key generated"
     
@@ -104,30 +67,27 @@ while true; do
     log ""
     log "Public key:"
     echo ""
-    sudo cat "${DEPLOY_KEY_FILE}.pub"
+    cat "${DEPLOY_KEY_FILE}.pub"
     echo ""
     log ""
     log "========================================="
     
-    # Ask user to confirm
-    prompt "Have you added this public key to GitHub? [y/N]: "
-    read -r response
+    # Read confirmation
+    read -e -p "${CYAN}Have you added this public key to GitHub? [y/N]: ${NC} " -r CONTINUE
+    CONTINUE="${CONTINUE:-N}"
+    echo ""
     
-    if [[ "$response" != "y" && "$response" != "Y" ]]; then
+    if [[ ! "$CONTINUE" =~ ^[Yy]$ ]]; then
         log "OK, let's try again with a new key..."
         continue
     fi
-    
-    # ---------------------------------------------------------------------------
-    # Step 3: Test SSH connection
-    # ---------------------------------------------------------------------------
     
     log ""
     log "========================================="
     log "Step 3: Testing SSH connection to GitHub"
     log "========================================="
     
-    # Configure SSH to use the deploy key
+    # Create SSH config in CURRENT user's home (important!)
     SSH_CONFIG_DIR="${HOME}/.ssh"
     mkdir -p "$SSH_CONFIG_DIR"
     chmod 700 "$SSH_CONFIG_DIR"
@@ -137,7 +97,6 @@ while true; do
     # Remove existing github.com entry if present
     if grep -q "github.com" "$SSH_CONFIG_FILE" 2>/dev/null; then
         log "Updating existing SSH config..."
-        # Create temp file without github.com block
         awk '
             /^# Solar Assistant deploy key/ { skip=1 }
             /^Host github.com/ { skip=1 }
@@ -151,7 +110,6 @@ while true; do
         mv "${SSH_CONFIG_FILE}.tmp" "$SSH_CONFIG_FILE"
     fi
     
-    # Add new github.com entry
     cat >> "$SSH_CONFIG_FILE" <<EOF
 
 # Solar Assistant deploy key
@@ -163,7 +121,6 @@ Host github.com
 EOF
     chmod 600 "$SSH_CONFIG_FILE"
     
-    # Test SSH connection
     log "Testing SSH connection..."
     if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
         log "✓ SSH connection successful!"
@@ -176,9 +133,7 @@ EOF
         log ""
         log "Next step: Clone and run the private repo install:"
         log "  cd /tmp && git clone git@github.com:${GITHUB_PRIVATE_REPO}.git"
-        log "  sudo bash ${GITHUB_PRIVATE_REPO##*/}/install.sh ${SITE_NAME}"
-        log ""
-        log "(Or wait for the private repo to auto-install via cron)"
+        log "  bash ${GITHUB_PRIVATE_REPO#*/}/install.sh ${SITE_NAME}"
         log ""
         exit 0
     else
