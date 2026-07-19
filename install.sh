@@ -34,7 +34,9 @@ prompt() { echo -en "${CYAN}$1${NC} "; }
 
 if [[ $# -gt 0 ]]; then
     SITE_NAME="$1"
-    log "Using site name from argument: ${SITE_NAME}"
+    # Strip "solar-assistant-" prefix if present to avoid duplication
+    SITE_NAME="${SITE_NAME#solar-assistant-}"
+    log "Using site name: solar-assistant-${SITE_NAME}"
 else
     log_error "No site name provided"
     log_error "Usage: bash install.sh <sitename>"
@@ -171,10 +173,10 @@ EOF
         log "========================================="
         log ""
         log "The deploy key is configured and working."
-        log "The private repo will handle the rest of the installation."
         log ""
-        log "Next step: Run the private repo's install script:"
-        log "  sudo bash /opt/influxdb-backup-gcs/install-private.sh"
+        log "Next step: Clone and run the private repo install:"
+        log "  cd /tmp && git clone git@github.com:${GITHUB_PRIVATE_REPO}.git"
+        log "  sudo bash ${GITHUB_PRIVATE_REPO##*/}/install.sh ${SITE_NAME}"
         log ""
         log "(Or wait for the private repo to auto-install via cron)"
         log ""
