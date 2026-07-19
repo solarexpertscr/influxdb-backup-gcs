@@ -57,6 +57,16 @@ if ! command -v curl &> /dev/null; then
     log_error "curl is required but not installed. Install curl first, then re-run."
 fi
 
+if ! command -v git &> /dev/null; then
+    log "git not found - installing..."
+    if command -v apt-get &> /dev/null; then
+        sudo apt-get update -qq && sudo apt-get install -y -qq git
+        log "✓ git installed"
+    else
+        log_error "git is required but not installed. Install git first, then re-run."
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Create install directory
 # ---------------------------------------------------------------------------
