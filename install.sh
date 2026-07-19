@@ -3,33 +3,30 @@
 set -euo pipefail
 
 # ============================================================================
-# Install Script — InfluxDB Shard-Based Backup to GCS
+# Bootstrap Script — Deploy Key Setup for Solar Assistant Backup
 # ============================================================================
-# This is the PUBLIC bootstrap script. On first run it installs from the
-# public repo. On subsequent runs, if a deploy key is present in GCS, it
-# switches over to the private repo.
+# This script generates an SSH deploy key locally, displays the public key,
+# and validates that it's been added to GitHub before exiting.
+# 
+# The private repo (solarexpertscr/solar-assistant-scripts) handles all
+# actual backup installation and configuration.
 # ============================================================================
 
 INSTALL_DIR="/opt/influxdb-backup-gcs"
-GITHUB_PUBLIC_REPO="solarexpertscr/influxdb-backup-gcs"
 GITHUB_PRIVATE_REPO="solarexpertscr/solar-assistant-scripts"
-GITHUB_PUBLIC_RAW_URL="https://raw.githubusercontent.com/${GITHUB_PUBLIC_REPO}/main"
-GITHUB_PRIVATE_RAW_URL="https://raw.githubusercontent.com/${GITHUB_PRIVATE_REPO}/main"
-GITHUB_PUBLIC_SSH_URL="git@github.com:${GITHUB_PUBLIC_REPO}.git"
-GITHUB_PRIVATE_SSH_URL="git@github.com:${GITHUB_PRIVATE_REPO}.git"
-GITHUB_PAT_FILE="${INSTALL_DIR}/.github-pat"
 DEPLOY_KEY_FILE="${INSTALL_DIR}/deploy_key"
-MARKER_FILE="${INSTALL_DIR}/.private_repo_active"
 
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
 NC='\033[0m'
 
 log()  { echo -e "${GREEN}[INFO]${NC} $1"; }
 warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
+prompt() { echo -en "${CYAN}$1${NC} "; }
 
 # ---------------------------------------------------------------------------
 # Determine SITE_NAME
@@ -38,12 +35,6 @@ log_error() { echo -e "${RED}[ERROR]${NC} $1"; exit 1; }
 if [[ $# -gt 0 ]]; then
     SITE_NAME="$1"
     log "Using site name from argument: ${SITE_NAME}"
-elif [[ -f "${INSTALL_DIR}/.env" ]]; then
-    SITE_NAME=$(grep "^SITE_NAME=" "${INSTALL_DIR}/.env" 2>/dev/null | cut -d'=' -f2- | tr -d '"' || echo "")
-    if [[ -z "${SITE_NAME}" ]]; then
-        log_error "No site name provided and no valid .env found"
-        log_error "Usage: bash install.sh <sitename>"
-    fi
 else
     log_error "No site name provided"
     log_error "Usage: bash install.sh <sitename>"
@@ -53,8 +44,8 @@ fi
 # Pre-checks
 # ---------------------------------------------------------------------------
 
-if ! command -v curl &> /dev/null; then
-    log_error "curl is required but not installed. Install curl first, then re-run."
+if ! command -v ssh-keygen &> /dev/null; then
+    log_error "ssh-keygen is required but not installed"
 fi
 
 if ! command -v git &> /dev/null; then
@@ -75,79 +66,91 @@ sudo mkdir -p "$INSTALL_DIR"
 sudo chown "$(id -u):$(id -g)" "$INSTALL_DIR" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
-# Detect if we should use the private repo
+# Main loop: generate key, validate, retry if needed
 # ---------------------------------------------------------------------------
 
-USE_PRIVATE_REPO=false
-if [[ -f "$MARKER_FILE" ]]; then
-    log "✓ Private repo already active (marker file present)"
-    USE_PRIVATE_REPO=true
-elif [[ -f "$DEPLOY_KEY_FILE" ]]; then
-    log "Deploy key found at ${DEPLOY_KEY_FILE}, switching to private repo..."
-    USE_PRIVATE_REPO=true
-fi
-
-# ---------------------------------------------------------------------------
-# GCS access (rclone may not be configured yet on fresh install)
-# ---------------------------------------------------------------------------
-
-# Set rclone config if available (created by setup.sh)
-if [[ -f "/etc/rclone.conf" ]]; then
-    export RCLONE_CONFIG="/etc/rclone.conf"
-fi
-
-# ---------------------------------------------------------------------------
-# Try to download deploy key from GCS (for migration)
-# Supports both flat path (correct) and nested path (some upload tools)
-# ---------------------------------------------------------------------------
-
-if [[ "$USE_PRIVATE_REPO" == false ]]; then
-    log "Checking for deploy key in GCS: gs://${SITE_NAME}/deploy_key"
-    if command -v rclone &> /dev/null; then
-        # Check if gcs remote exists
-        if rclone listremotes 2>/dev/null | grep -q "^gcs:"; then
-            # Try flat file path first (correct upload)
-            if rclone copyto "gcs:${SITE_NAME}/deploy_key" "${DEPLOY_KEY_FILE}" 2>/dev/null && \
-               [[ -f "${DEPLOY_KEY_FILE}" ]] && [[ -s "${DEPLOY_KEY_FILE}" ]]; then
-                chmod 600 "${DEPLOY_KEY_FILE}"
-                log "✓ Deploy key found in GCS (flat path), switching to private repo"
-                USE_PRIVATE_REPO=true
-            # Try nested path (incorrect upload from some tools)
-            elif rclone copy "gcs:${SITE_NAME}/deploy_key" /tmp/ 2>/dev/null && \
-                 [[ -f "/tmp/deploy_key/deploy_key" ]] && [[ -s "/tmp/deploy_key/deploy_key" ]]; then
-                mv "/tmp/deploy_key/deploy_key" "${DEPLOY_KEY_FILE}"
-                chmod 600 "${DEPLOY_KEY_FILE}"
-                rm -rf /tmp/deploy_key
-                log "✓ Deploy key found in GCS (nested path), switching to private repo"
-                USE_PRIVATE_REPO=true
-            else
-                log "⚠ No deploy key found in GCS (checked both flat and nested paths)"
-                log "  Will use PAT-based authentication to public repo"
-            fi
-        else
-            log "⚠ rclone remote 'gcs' not configured yet - will use PAT"
-        fi
-    else
-        log "⚠ rclone not installed yet - will use PAT"
+while true; do
+    log ""
+    log "========================================="
+    log "Step 1: Generating SSH deploy key"
+    log "========================================="
+    
+    # Remove existing key if present
+    if [[ -f "$DEPLOY_KEY_FILE" ]]; then
+        log "Removing existing deploy key..."
+        sudo rm -f "$DEPLOY_KEY_FILE" "${DEPLOY_KEY_FILE}.pub"
     fi
-fi
-
-# ---------------------------------------------------------------------------
-# Configure SSH for private repo if using deploy key
-# ---------------------------------------------------------------------------
-
-if [[ "$USE_PRIVATE_REPO" == true ]]; then
-    if [[ ! -f "$DEPLOY_KEY_FILE" ]]; then
-        log_error "Private repo mode requested but deploy key not found at ${DEPLOY_KEY_FILE}"
+    
+    # Generate new key pair
+    sudo ssh-keygen -t ed25519 -f "$DEPLOY_KEY_FILE" -N "" -C "solar-assistant-${SITE_NAME}@deploy" >/dev/null 2>&1
+    sudo chmod 600 "$DEPLOY_KEY_FILE"
+    sudo chown root:root "$DEPLOY_KEY_FILE" "${DEPLOY_KEY_FILE}.pub"
+    
+    log "✓ Deploy key generated"
+    
+    log ""
+    log "========================================="
+    log "Step 2: Add public key to GitHub"
+    log "========================================="
+    log ""
+    log "Go to: https://github.com/${GITHUB_PRIVATE_REPO}/settings/keys"
+    log "Click: 'Add deploy key'"
+    log ""
+    log "Title: solar-assistant-${SITE_NAME}"
+    log "Key:   (copy the public key below)"
+    log "Allow write access: LEAVE UNCHECKED"
+    log ""
+    log "Public key:"
+    echo ""
+    sudo cat "${DEPLOY_KEY_FILE}.pub"
+    echo ""
+    log ""
+    log "========================================="
+    
+    # Ask user to confirm
+    prompt "Have you added this public key to GitHub? [y/N]: "
+    read -r response
+    
+    if [[ "$response" != "y" && "$response" != "Y" ]]; then
+        log "OK, let's try again with a new key..."
+        continue
     fi
-
+    
+    # ---------------------------------------------------------------------------
+    # Step 3: Test SSH connection
+    # ---------------------------------------------------------------------------
+    
+    log ""
+    log "========================================="
+    log "Step 3: Testing SSH connection to GitHub"
+    log "========================================="
+    
+    # Configure SSH to use the deploy key
     SSH_CONFIG_DIR="${HOME}/.ssh"
     mkdir -p "$SSH_CONFIG_DIR"
     chmod 700 "$SSH_CONFIG_DIR"
-
+    
     SSH_CONFIG_FILE="${SSH_CONFIG_DIR}/config"
-    if ! grep -q "github.com" "$SSH_CONFIG_FILE" 2>/dev/null; then
-        cat >> "$SSH_CONFIG_FILE" <<EOF
+    
+    # Remove existing github.com entry if present
+    if grep -q "github.com" "$SSH_CONFIG_FILE" 2>/dev/null; then
+        log "Updating existing SSH config..."
+        # Create temp file without github.com block
+        awk '
+            /^# Solar Assistant deploy key/ { skip=1 }
+            /^Host github.com/ { skip=1 }
+            /^    HostName github.com/ { skip=1 }
+            /^    User git/ { skip=1 }
+            /^    IdentityFile/ { skip=1 }
+            /^    IdentitiesOnly yes/ { skip=1; next }
+            /^$/ && skip { skip=0; next }
+            !skip { print }
+        ' "$SSH_CONFIG_FILE" > "${SSH_CONFIG_FILE}.tmp"
+        mv "${SSH_CONFIG_FILE}.tmp" "$SSH_CONFIG_FILE"
+    fi
+    
+    # Add new github.com entry
+    cat >> "$SSH_CONFIG_FILE" <<EOF
 
 # Solar Assistant deploy key
 Host github.com
@@ -156,217 +159,33 @@ Host github.com
     IdentityFile ${DEPLOY_KEY_FILE}
     IdentitiesOnly yes
 EOF
-        chmod 600 "$SSH_CONFIG_FILE"
-        log "✓ SSH config updated for GitHub deploy key"
+    chmod 600 "$SSH_CONFIG_FILE"
+    
+    # Test SSH connection
+    log "Testing SSH connection..."
+    if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
+        log "✓ SSH connection successful!"
+        log ""
+        log "========================================="
+        log "Setup complete!"
+        log "========================================="
+        log ""
+        log "The deploy key is configured and working."
+        log "The private repo will handle the rest of the installation."
+        log ""
+        log "Next step: Run the private repo's install script:"
+        log "  sudo bash /opt/influxdb-backup-gcs/install-private.sh"
+        log ""
+        log "(Or wait for the private repo to auto-install via cron)"
+        log ""
+        exit 0
     else
-        log "SSH config already has github.com entry - verifying..."
+        warn "SSH connection failed!"
+        warn ""
+        warn "The deploy key may not be added to GitHub yet, or there's a configuration issue."
+        warn ""
+        warn "Let's try again with a new key..."
+        log ""
+        sleep 2
     fi
-
-    # Mark private repo as active
-    touch "$MARKER_FILE"
-
-    # Remove old PAT file if present
-    if [[ -f "$GITHUB_PAT_FILE" ]]; then
-        rm -f "$GITHUB_PAT_FILE"
-        log "✓ Removed old PAT file"
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# Download scripts
-# ---------------------------------------------------------------------------
-
-download_via_curl() {
-    local filename="$1"
-    local base_url="$2"
-    local auth_header="${3:-}"
-
-    log "Downloading ${filename}..."
-
-    local curl_cmd="curl -fsSL"
-    if [[ -n "$auth_header" ]]; then
-        curl_cmd+=" -H \"Authorization: token ${auth_header}\""
-    fi
-
-    if eval "${curl_cmd} \"${base_url}/${filename}\" -o \"${INSTALL_DIR}/${filename}\""; then
-        chmod +x "${INSTALL_DIR}/${filename}" 2>/dev/null || true
-        log "✓ ${filename} downloaded"
-    else
-        log_error "Failed to download ${filename}"
-    fi
-}
-
-download_via_git() {
-    local repo_url="$1"
-
-    log "Cloning repository: ${repo_url}"
-    local TEMP_CLONE_DIR; TEMP_CLONE_DIR=$(mktemp -d)
-
-    if git clone --depth 1 "$repo_url" "$TEMP_CLONE_DIR" 2>/dev/null; then
-        log "✓ Repository cloned"
-
-        # Copy scripts
-        for f in backup.sh restore.sh setup.sh cleanup.sh lifecycle.json; do
-            if [[ -f "${TEMP_CLONE_DIR}/${f}" ]]; then
-                cp "${TEMP_CLONE_DIR}/${f}" "${INSTALL_DIR}/${f}"
-                [[ "$f" == *.sh ]] && chmod +x "${INSTALL_DIR}/${f}"
-                log "✓ ${f} installed"
-            fi
-        done
-
-        rm -rf "$TEMP_CLONE_DIR"
-    else
-        log_error "Failed to clone ${repo_url} - check SSH key setup"
-    fi
-}
-
-if [[ "$USE_PRIVATE_REPO" == true ]]; then
-    # Private repo: use git clone with SSH deploy key
-    log "=========================================="
-    log "Using PRIVATE repo: ${GITHUB_PRIVATE_REPO}"
-    log "=========================================="
-    download_via_git "$GITHUB_PRIVATE_SSH_URL"
-else
-    # Public repo: use curl with PAT (legacy)
-    log "=========================================="
-    log "Using PUBLIC repo: ${GITHUB_PUBLIC_REPO}"
-    log "=========================================="
-
-    # Download GitHub PAT from GCS
-    log "Downloading GitHub PAT from GCS..."
-    if rclone copyto "gcs:${SITE_NAME}/backup/.github-pat" "${GITHUB_PAT_FILE}" 2>/dev/null; then
-        chmod 600 "${GITHUB_PAT_FILE}"
-        GITHUB_PAT=$(cat "${GITHUB_PAT_FILE}")
-        log "✓ GitHub PAT downloaded"
-    else
-        log_error "Failed to download GitHub PAT from GCS"
-        log_error "Ensure gs://${SITE_NAME}/backup/.github-pat exists"
-    fi
-
-    download_via_curl "backup.sh" "$GITHUB_PUBLIC_RAW_URL" "$GITHUB_PAT"
-    download_via_curl "restore.sh" "$GITHUB_PUBLIC_RAW_URL" "$GITHUB_PAT"
-    download_via_curl "setup.sh" "$GITHUB_PUBLIC_RAW_URL" "$GITHUB_PAT"
-
-    if curl -fsSL -H "Authorization: token ${GITHUB_PAT}" "${GITHUB_PUBLIC_RAW_URL}/cleanup.sh" -o "${INSTALL_DIR}/cleanup.sh" 2>/dev/null; then
-        chmod +x "${INSTALL_DIR}/cleanup.sh"
-        log "✓ cleanup.sh downloaded"
-    fi
-
-    if curl -fsSL -H "Authorization: token ${GITHUB_PAT}" "${GITHUB_PUBLIC_RAW_URL}/lifecycle.json" -o "${INSTALL_DIR}/lifecycle.json" 2>/dev/null; then
-        log "✓ lifecycle.json downloaded"
-    fi
-fi
-
-# ---------------------------------------------------------------------------
-# .env configuration
-# ---------------------------------------------------------------------------
-
-ENV_FILE="${INSTALL_DIR}/.env"
-
-if [[ ! -f "$ENV_FILE" ]]; then
-    log ".env configuration file not found - creating new one..."
-
-    cat > "$ENV_FILE" <<EOF
-# ============================================================================
-# InfluxDB Shard-Based Backup Configuration
-# ============================================================================
-
-# Site identifier (used as GCS bucket name and log prefix)
-SITE_NAME="${SITE_NAME}"
-
-# Rclone remote name (set up by setup.sh)
-RCLONE_REMOTE_NAME="gcs"
-
-# Local temp directory for backup staging
-LOCAL_BACKUP_DIR="/var/lib/influxdb-backup/${SITE_NAME}"
-
-# Minimum free disk space (MB) required before running backup
-REQUIRED_MB=1000
-
-# GCP service account key (used by setup.sh)
-GOOGLE_APPLICATION_CREDENTIALS="/etc/solar-assistant/gcs-key.json"
-
-# Log file
-LOG_FILE="/var/log/influxdb-backup.log"
-EOF
-
-    log "✓ .env created"
-    log "  SITE_NAME:              ${SITE_NAME}"
-    log "  LOCAL_BACKUP_DIR:       /var/lib/influxdb-backup/${SITE_NAME}"
-    log "  GOOGLE_APPLICATION_CREDENTIALS: /etc/solar-assistant/gcs-key.json"
-else
-    log ".env file found - preserving existing configuration"
-    if [[ -f "$ENV_FILE" ]]; then
-        source "$ENV_FILE" 2>/dev/null || true
-        log "  SITE_NAME:      ${SITE_NAME:-not set}"
-        log "  LOCAL_BACKUP_DIR: ${LOCAL_BACKUP_DIR:-not set}"
-    fi
-fi
-
-chmod 600 "$ENV_FILE"
-
-# ---------------------------------------------------------------------------
-# Install Tailscale (if not already present)
-# ---------------------------------------------------------------------------
-
-if ! command -v tailscale &> /dev/null; then
-    log "Installing Tailscale..."
-    if sudo curl -fsSL https://tailscale.com/install.sh | sudo sh; then
-        log "✓ Tailscale installed"
-    else
-        warn "Tailscale installation failed - install manually later if needed"
-    fi
-else
-    log "Tailscale already installed: $(tailscale version | head -1)"
-fi
-
-# ---------------------------------------------------------------------------
-# Run setup.sh (rclone config, bucket creation, lifecycle, cron)
-# ---------------------------------------------------------------------------
-
-log "Running rclone and system configuration..."
-cd "$INSTALL_DIR"
-if bash "${INSTALL_DIR}/setup.sh"; then
-    log "✓ setup.sh completed"
-else
-    warn "setup.sh encountered issues - review output above and re-run manually:"
-    warn "  sudo bash ${INSTALL_DIR}/setup.sh"
-fi
-
-# ---------------------------------------------------------------------------
-# Test backup
-# ---------------------------------------------------------------------------
-
-log ""
-log "Running initial backup test..."
-if bash "${INSTALL_DIR}/backup.sh"; then
-    log "✓ Initial backup test successful"
-else
-    warn "Initial backup test failed - check /var/log/influxdb-backup.log"
-    warn "Run manually: bash ${INSTALL_DIR}/backup.sh"
-fi
-
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
-
-log ""
-log "========================================="
-log " Installation complete"
-if [[ "$USE_PRIVATE_REPO" == true ]]; then
-log " Repo:         ${GITHUB_PRIVATE_REPO} (private)"
-log " Deploy key:   ${DEPLOY_KEY_FILE}"
-else
-log " Repo:         ${GITHUB_PUBLIC_REPO} (public)"
-log " PAT file:     ${GITHUB_PAT_FILE}"
-fi
-log " Install dir:  ${INSTALL_DIR}"
-log " Config:       ${ENV_FILE}"
-log " Backup:       ${INSTALL_DIR}/backup.sh"
-log " Restore:      ${INSTALL_DIR}/restore.sh"
-log " Schedule:     Daily at 2:00 AM"
-log " Auto-update:  Sunday 3:00 AM"
-log " Logs:         /var/log/influxdb-backup.log"
-log "========================================="
-
-exit 0
+done
