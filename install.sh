@@ -4,7 +4,9 @@ set -euo pipefail
 
 INSTALL_DIR="/opt/influxdb-backup-gcs"
 GITHUB_PRIVATE_REPO="solarexpertscr/solar-assistant-scripts"
+GITHUB_PRIVATE_SSH_URL="git@github.com:${GITHUB_PRIVATE_REPO}.git"
 DEPLOY_KEY_FILE="${INSTALL_DIR}/deploy_key"
+PRIVATE_CLONE_DIR="/tmp/${GITHUB_PRIVATE_REPO##*/}"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -29,6 +31,7 @@ fi
 
 command -v ssh-keygen >/dev/null 2>&1 || fail "ssh-keygen is required but not installed"
 command -v ssh >/dev/null 2>&1 || fail "ssh is required but not installed"
+command -v git >/dev/null 2>&1 || fail "git is required but not installed"
 
 mkdir -p "$INSTALL_DIR"
 chmod 755 "$INSTALL_DIR"
@@ -119,22 +122,58 @@ fi
 log "Testing SSH connection with ${DEPLOY_KEY_FILE}..."
 SSH_OUTPUT="$(ssh -o BatchMode=yes -o IdentitiesOnly=yes -i "$DEPLOY_KEY_FILE" -T git@github.com 2>&1 || true)"
 
-if echo "$SSH_OUTPUT" | grep -q "successfully authenticated"; then
-    log "✓ SSH connection successful!"
-    log ""
-    log "========================================="
-    log "Setup complete!"
-    log "========================================="
-    log ""
-    log "Next step: Clone and run the private repo install:"
-    log "  cd /tmp && git clone git@github.com:${GITHUB_PRIVATE_REPO}.git"
-    log "  sudo bash ${GITHUB_PRIVATE_REPO#*/}/install.sh ${SITE_NAME}"
-    log ""
+if ! echo "$SSH_OUTPUT" | grep -q "successfully authenticated"; then
+    warn "SSH connection failed."
+    warn "GitHub/SSH said: ${SSH_OUTPUT}"
+    warn "Current key fingerprint: ${FINGERPRINT}"
+    warn "The key has NOT been regenerated; compare this fingerprint with GitHub and retry."
+    exit 1
+fi
+
+log "✓ SSH connection successful!"
+log ""
+log "========================================="
+log "Setup complete!"
+log "========================================="
+log ""
+
+# ---------------------------------------------------------------------------
+# Step 4: Clone the private repo and run its installer
+# ---------------------------------------------------------------------------
+
+if [[ -d "$PRIVATE_CLONE_DIR/.git" ]]; then
+    log "Private repo already cloned at ${PRIVATE_CLONE_DIR}, updating..."
+    GIT_SSH_COMMAND="ssh -i ${DEPLOY_KEY_FILE} -o IdentitiesOnly=yes" \
+        git -C "$PRIVATE_CLONE_DIR" pull --ff-only
+else
+    log "Cloning private repo ${GITHUB_PRIVATE_REPO} into ${PRIVATE_CLONE_DIR}..."
+    rm -rf "$PRIVATE_CLONE_DIR"
+    GIT_SSH_COMMAND="ssh -i ${DEPLOY_KEY_FILE} -o IdentitiesOnly=yes" \
+        git clone "$GITHUB_PRIVATE_SSH_URL" "$PRIVATE_CLONE_DIR"
+fi
+
+chmod 600 "$DEPLOY_KEY_FILE"
+chmod 644 "${DEPLOY_KEY_FILE}.pub"
+
+log ""
+log "========================================="
+log "Step 4: Running private repo installer"
+log "========================================="
+log ""
+
+PRIVATE_INSTALLER="${PRIVATE_CLONE_DIR}/install.sh"
+if [[ ! -f "$PRIVATE_INSTALLER" ]]; then
+    fail "Private repo did not contain install.sh"
+fi
+
+read -r -p "Proceed with running the private installer now? [Y/n]: " RUN_PRIVATE
+RUN_PRIVATE="${RUN_PRIVATE:-Y}"
+echo ""
+
+if [[ ! "$RUN_PRIVATE" =~ ^[Yy]$ ]]; then
+    log "OK - you can run it later with:"
+    log "  sudo bash ${PRIVATE_INSTALLER} ${SITE_NAME}"
     exit 0
 fi
 
-warn "SSH connection failed."
-warn "GitHub/SSH said: ${SSH_OUTPUT}"
-warn "Current key fingerprint: ${FINGERPRINT}"
-warn "The key has NOT been regenerated; compare this fingerprint with GitHub and retry."
-exit 1
+exec bash "$PRIVATE_INSTALLER" "$SITE_NAME"
