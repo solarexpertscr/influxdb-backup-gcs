@@ -29,16 +29,6 @@ if ! command -v ssh-keygen &> /dev/null; then
     log_error "ssh-keygen is required but not installed"
 fi
 
-if ! command -v git &> /dev/null; then
-    log "git not found - installing..."
-    if command -v apt-get &> /dev/null; then
-        apt-get update -qq && apt-get install -y -qq git
-        log "✓ git installed"
-    else
-        log_error "git is required but not installed"
-    fi
-fi
-
 mkdir -p "$INSTALL_DIR"
 
 while true; do
@@ -47,7 +37,7 @@ while true; do
     log "Step 1: Generating SSH deploy key"
     log "========================================="
     
-    rm -f "$DEPLOY_KEY_FILE" "${DEPLOY_KEY_FILE}.pub"
+    # Generate new key pair
     ssh-keygen -t ed25519 -f "$DEPLOY_KEY_FILE" -N "" -C "solar-assistant-${SITE_NAME}@deploy" >/dev/null 2>&1
     chmod 600 "$DEPLOY_KEY_FILE"
     
@@ -65,6 +55,8 @@ while true; do
     log "Key:   (copy the public key below)"
     log "Allow write access: LEAVE UNCHECKED"
     log ""
+    log "Fingerprint: $(ssh-keygen -lf "$DEPLOY_KEY_FILE" | awk '{print $2}')"
+    log ""
     log "Public key:"
     echo ""
     cat "${DEPLOY_KEY_FILE}.pub"
@@ -72,7 +64,6 @@ while true; do
     log ""
     log "========================================="
     
-    # Read confirmation
     read -e -p "${CYAN}Have you added this public key to GitHub? [y/N]: ${NC} " -r CONTINUE
     CONTINUE="${CONTINUE:-N}"
     echo ""
@@ -87,28 +78,12 @@ while true; do
     log "Step 3: Testing SSH connection to GitHub"
     log "========================================="
     
-    # Create SSH config in CURRENT user's home (important!)
+    # Create SSH config in CURRENT user's home
     SSH_CONFIG_DIR="${HOME}/.ssh"
     mkdir -p "$SSH_CONFIG_DIR"
     chmod 700 "$SSH_CONFIG_DIR"
     
     SSH_CONFIG_FILE="${SSH_CONFIG_DIR}/config"
-    
-    # Remove existing github.com entry if present
-    if grep -q "github.com" "$SSH_CONFIG_FILE" 2>/dev/null; then
-        log "Updating existing SSH config..."
-        awk '
-            /^# Solar Assistant deploy key/ { skip=1 }
-            /^Host github.com/ { skip=1 }
-            /^    HostName github.com/ { skip=1 }
-            /^    User git/ { skip=1 }
-            /^    IdentityFile/ { skip=1 }
-            /^    IdentitiesOnly yes/ { skip=1; next }
-            /^$/ && skip { skip=0; next }
-            !skip { print }
-        ' "$SSH_CONFIG_FILE" > "${SSH_CONFIG_FILE}.tmp"
-        mv "${SSH_CONFIG_FILE}.tmp" "$SSH_CONFIG_FILE"
-    fi
     
     cat >> "$SSH_CONFIG_FILE" <<EOF
 
@@ -121,7 +96,9 @@ Host github.com
 EOF
     chmod 600 "$SSH_CONFIG_FILE"
     
+    log "SSH config written to ${SSH_CONFIG_FILE}"
     log "Testing SSH connection..."
+    
     if ssh -T git@github.com 2>&1 | grep -q "successfully authenticated"; then
         log "✓ SSH connection successful!"
         log ""
@@ -139,9 +116,10 @@ EOF
     else
         warn "SSH connection failed!"
         warn ""
-        warn "The deploy key may not be added to GitHub yet, or there's a configuration issue."
+        warn "The deploy key may not be added to GitHub yet."
+        warn "Current key fingerprint: $(ssh-keygen -lf "$DEPLOY_KEY_FILE" | awk '{print $2}')"
         warn ""
-        warn "Let's try again with a new key..."
+        warn "Let's try again with a fresh key..."
         log ""
         sleep 2
     fi
